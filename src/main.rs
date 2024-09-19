@@ -1,3 +1,4 @@
+#![feature(impl_trait_in_assoc_type)]
 #![no_std]
 #![no_main]
 
@@ -18,8 +19,8 @@ use esp_hal::{
 use esp_println::dbg;
 use esp_wifi::{self, wifi::WifiStaDevice};
 
-#[entry]
-fn main() -> ! {
+#[esp_hal_embassy::main]
+async fn main(spawn: embassy_executor::Spawner) -> ! {
     // Provides #[global_allocator] with given number of bytes.
     // Bigger value here means smaller space left for stack.
     esp_alloc::heap_allocator!(1024);
@@ -40,13 +41,17 @@ fn main() -> ! {
         &clocks,
     )
     .unwrap();
-    let mut storage: [_; 3] = Default::default();
-    let (iface, device, mut controller, sockets) =
-        esp_wifi::wifi::utils::create_network_interface(&init, wifi, WifiStaDevice, &mut storage)
-            .unwrap();
-    controller.start().unwrap();
-    let s = controller.scan_n::<3>();
-    dbg!(s);
+    let mut socket_storage: [_; 3] = Default::default();
+    let (iface, device, mut controller, sockets) = esp_wifi::wifi::utils::create_network_interface(
+        &init,
+        wifi,
+        WifiStaDevice,
+        &mut socket_storage,
+    )
+    .unwrap();
+    controller.start().await.unwrap();
+    let s = controller.scan_n::<24>().await;
+    dbg!(&s, sockets);
 
     esp_println::logger::init_logger_from_env();
 

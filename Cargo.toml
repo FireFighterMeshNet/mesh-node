@@ -5,6 +5,13 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+embassy-executor = { version = "0.6.0", features = ["nightly", "executor-thread", "executor-interrupt"] }
+embassy-net = { version = "0.4.0", features = [
+    "tcp",
+    "udp",
+    "dhcpv4", "medium-ethernet", "proto-ipv4"
+] }
+embassy-time = "0.3.2"
 esp-alloc = "0.4.0"
 esp-backtrace = { version = "0.14.0", features = [
     "esp32",
@@ -12,9 +19,12 @@ esp-backtrace = { version = "0.14.0", features = [
     "panic-handler",
     "println",
 ] }
-esp-hal = { version = "0.20.1", features = ["esp32"] }
+esp-hal = { version = "0.20.1", features = ["esp32", "async"] }
+esp-hal-embassy = { version = "0.3.0", features = ["esp32", "log"] }
 esp-println = { version = "0.11.0", features = ["esp32", "log"] }
-esp-wifi = { version = "0.9.1", features = ["esp32", "wifi", "utils", "ipv4"] }
+esp-wifi = { version = "0.9.1", features = ["esp32", "embassy-net", "wifi", "utils", "ipv4"
+    # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
+] }
 log = { version = "0.4.21" }
 
 [profile.dev]
