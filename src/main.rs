@@ -11,8 +11,12 @@ use esp_hal::{
     gpio::{Input, Io},
     peripherals::Peripherals,
     prelude::*,
+    rng::Rng,
     system::SystemControl,
+    timer::timg::TimerGroup,
 };
+use esp_println::dbg;
+use esp_wifi::{self, wifi::WifiStaDevice};
 
 #[entry]
 fn main() -> ! {
@@ -25,6 +29,24 @@ fn main() -> ! {
 
     let clocks = ClockControl::max(system.clock_control).freeze();
     let delay = Delay::new(&clocks);
+
+    let wifi = peripherals.WIFI;
+    let timer = TimerGroup::new(peripherals.TIMG0, &clocks);
+    let init = esp_wifi::initialize(
+        esp_wifi::EspWifiInitFor::Wifi,
+        timer.timer0,
+        Rng::new(peripherals.RNG),
+        peripherals.RADIO_CLK,
+        &clocks,
+    )
+    .unwrap();
+    let mut storage: [_; 3] = Default::default();
+    let (iface, device, mut controller, sockets) =
+        esp_wifi::wifi::utils::create_network_interface(&init, wifi, WifiStaDevice, &mut storage)
+            .unwrap();
+    controller.start().unwrap();
+    let s = controller.scan_n::<3>();
+    dbg!(s);
 
     esp_println::logger::init_logger_from_env();
 

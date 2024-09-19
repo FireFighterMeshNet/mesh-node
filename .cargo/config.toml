@@ -6,7 +6,12 @@ runner = "espflash flash --monitor"
 ESP_LOGLEVEL = "INFO"
 
 [build]
-rustflags = ["-C", "link-arg=-nostartfiles"]
+rustflags = [
+    "-C", "link-arg=-nostartfiles",
+    # See <https://docs.rs/esp-wifi/latest/esp_wifi/>
+    "-C", "link-arg=-Tlinkall.x",
+    "-C", "link-arg=-Trom_functions.x",
+]
 
 target = "xtensa-esp32-none-elf"
 
