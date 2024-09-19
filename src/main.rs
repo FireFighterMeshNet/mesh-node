@@ -17,6 +17,7 @@ use esp_hal::{
 #[entry]
 fn main() -> ! {
     // Provides #[global_allocator] with given number of bytes.
+    // Bigger value here means smaller space left for stack.
     esp_alloc::heap_allocator!(1024);
 
     let peripherals = Peripherals::take();
@@ -28,15 +29,15 @@ fn main() -> ! {
     esp_println::logger::init_logger_from_env();
 
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
-    let button = Input::new(io.pins.gpio0, esp_hal::gpio::Pull::None);
+    let boot_button = Input::new(io.pins.gpio0, esp_hal::gpio::Pull::None);
 
     let mut v: Vec<u8> = vec![0; 256];
     let mut i = 0;
     loop {
         log::info!("Hello world!");
-        if button.is_high() {
+        if boot_button.is_high() {
             log::info!("hi")
-        } else if button.is_low() {
+        } else if boot_button.is_low() {
             log::info!("lo")
         }
         log::info!("v: {:?}", v.len());
