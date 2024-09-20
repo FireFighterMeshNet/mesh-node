@@ -4,8 +4,12 @@
 
 // extern crate alloc;
 
-use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
+use core::str;
+use embassy_net::{
+    tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4,
+};
 use embassy_time::{Duration, Timer};
+use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
     clock::ClockControl,
@@ -104,8 +108,6 @@ async fn main(spawn: embassy_executor::Spawner) -> ! {
     )
     .unwrap();
     let wifi = peripherals.WIFI;
-    // let (wifi_interface, mut controller) =
-    //     esp_wifi::wifi::new_with_mode(&init, wifi, WifiStaDevice).unwrap();
     let (wifi_ap_interface, wifi_sta_interface, controller) =
         esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
     let config = embassy_net::Config::ipv4_static(StaticConfigV4 {
@@ -113,7 +115,6 @@ async fn main(spawn: embassy_executor::Spawner) -> ! {
         gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
         dns_servers: Default::default(),
     });
-
     let stack = make_static!(
         Stack<WifiDevice<'_, WifiApDevice>>,
         Stack::new(
@@ -127,6 +128,76 @@ async fn main(spawn: embassy_executor::Spawner) -> ! {
     spawn.must_spawn(net_task(stack));
     spawn.must_spawn(connection(controller));
     spawn.must_spawn(boot_button_reply(io.pins.gpio0));
+
+    let mut rx_buffer = [0; 2usize.pow(10)];
+    let mut tx_buffer = [0; 2usize.pow(10)];
+
+    loop {
+        if dbg!(stack.is_link_up()) {
+            break;
+        }
+        Timer::after_millis(500).await;
+    }
+
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    socket.set_timeout(Some(Duration::from_secs(10)));
+    loop {
+        log::info!("Waiting for connection...");
+        let r = socket
+            .accept(IpListenEndpoint {
+                addr: None,
+                port: 8000,
+            })
+            .await;
+        log::info!(
+            "Connected: state: {}, local: {:?}, remote: {:?}",
+            socket.state(),
+            socket.local_endpoint(),
+            socket.remote_endpoint()
+        );
+        err!(r);
+
+        let mut buffer = [0u8; 2usize.pow(10)];
+        loop {
+            log::info!("read loop");
+            match dbg!(socket.read(&mut buffer).await) {
+                Ok(0) => {
+                    log::info!("EOF");
+                    break;
+                }
+                Ok(len) => {
+                    let received = str::from_utf8(&buffer[0..len]).unwrap();
+                    log::info!("read {} bytes of: {}", len, received);
+                    if received.contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                e @ Err(_) => err!(e),
+            }
+        }
+        log::info!("Writing...");
+        // let r = socket
+        //     .write_all(b"HTTP/1.0 411 Length Required\r\nContent-Length: 0\r\n\r\n")
+        //     .await;
+        let r = socket
+            .write_all(
+                b"HTTP/1.0 200 OK\r\n\
+                Content-Length: 44\r\n\r\n\
+                <html><body><h1>Hi! From ESP32</body></html>",
+            )
+            .await;
+        err!(r);
+        log::info!("Flushing...");
+        let r = socket.flush().await;
+        log::info!("Flushed and closing");
+        err!(r);
+        socket.close();
+        let r = socket.flush().await;
+        err!(r);
+        socket.abort();
+        let r = socket.flush().await;
+        err!(r);
+    }
 
     loop {
         Timer::after(Duration::MAX).await;

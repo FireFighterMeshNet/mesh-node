@@ -28,3 +28,17 @@ macro_rules! make_static {
         STATIC_CELL.init_with(|| $val)
     }};
 }
+
+/// Log error with [`Debug`] impl or [`Display`] if called with leading `%`
+macro_rules! err {
+    ($e:expr) => {
+        if let Err(e) = $e {
+            log::error!("[{}:{}] {e:?}", file!(), line!())
+        }
+    };
+    (%$e:expr) => {
+        if let Err(e) = $e {
+            log::error!("[{}:{}] {e:?}", file!(), line!())
+        }
+    };
+}

@@ -13,6 +13,7 @@ embassy-net = { version = "0.4.0", features = [
 ] }
 # embassy-sync = "0.6.0"
 embassy-time = { version = "0.3.2", features = ["generic-queue"] }
+embedded-io-async = "0.6.1"
 esp-alloc = "0.4.0"
 esp-backtrace = { version = "0.14.0", features = [
     "esp32",
