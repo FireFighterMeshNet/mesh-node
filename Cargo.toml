@@ -11,7 +11,8 @@ embassy-net = { version = "0.4.0", features = [
     "udp",
     "dhcpv4", "medium-ethernet", "proto-ipv4"
 ] }
-embassy-time = "0.3.2"
+# embassy-sync = "0.6.0"
+embassy-time = { version = "0.3.2", features = ["generic-queue"] }
 esp-alloc = "0.4.0"
 esp-backtrace = { version = "0.14.0", features = [
     "esp32",
@@ -19,18 +20,24 @@ esp-backtrace = { version = "0.14.0", features = [
     "panic-handler",
     "println",
 ] }
-esp-hal = { version = "0.20.1", features = ["esp32", "async"] }
+esp-hal = { version = "0.20.1", features = ["esp32", "async", "log"] }
 esp-hal-embassy = { version = "0.3.0", features = ["esp32", "log"] }
 esp-println = { version = "0.11.0", features = ["esp32", "log"] }
-esp-wifi = { version = "0.9.1", features = ["esp32", "embassy-net", "wifi", "utils", "ipv4"
+esp-wifi = { version = "0.9.1", features = ["esp32",
+    "embassy-net", "async",
+    "utils", "ipv4", "tcp", "udp", "dhcpv4",
+    "wifi",
     # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
 ] }
 log = { version = "0.4.21" }
+static_cell = "2.1.0"
 
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
 opt-level = "s"
+# esp_wifi is broken with overflow-checks
+overflow-checks = false
 
 [profile.release]
 codegen-units = 1        # LLVM can perform better optimizations using a single thread
@@ -40,3 +47,6 @@ incremental = false
 lto = 'fat'
 opt-level = 's'
 overflow-checks = false
+
+[build-dependencies]
+const-gen = "1.6.5"
