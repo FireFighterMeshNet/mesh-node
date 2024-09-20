@@ -5,11 +5,11 @@
 // extern crate alloc;
 
 use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::ClockControl,
-    gpio::{Input, Io},
+    gpio::{GpioPin, Input, Io},
     peripherals::Peripherals,
     rng::Rng,
     system::SystemControl,
@@ -28,6 +28,19 @@ pub mod util;
 /// Build time generated constants.
 mod build_consts {
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
+}
+
+/// Display a message when the button is pressed to confirm the device is still responsive.
+#[embassy_executor::task]
+async fn boot_button_reply(gpio0: GpioPin<0>) {
+    let mut boot_button = Input::new(gpio0, esp_hal::gpio::Pull::None);
+
+    let mut i = 0u8;
+    loop {
+        boot_button.wait_for_falling_edge().await;
+        log::info!("I'm still alive! {i}");
+        i = i.wrapping_add(1);
+    }
 }
 
 /// Run the network stack so the WifiAP responds to network events.
@@ -78,6 +91,7 @@ async fn main(spawn: embassy_executor::Spawner) -> ! {
     let system = SystemControl::new(peripherals.SYSTEM);
     let clocks = ClockControl::max(system.clock_control).freeze();
     let timer = TimerGroup::new(peripherals.TIMG0, &clocks);
+    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     esp_println::logger::init_logger_from_env();
     esp_hal_embassy::init(&clocks, timer.timer0);
 
@@ -112,14 +126,9 @@ async fn main(spawn: embassy_executor::Spawner) -> ! {
 
     spawn.must_spawn(net_task(stack));
     spawn.must_spawn(connection(controller));
+    spawn.must_spawn(boot_button_reply(io.pins.gpio0));
 
-    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
-    let mut boot_button = Input::new(io.pins.gpio0, esp_hal::gpio::Pull::None);
-
-    let mut i = 0u8;
     loop {
-        boot_button.wait_for_falling_edge().await;
-        log::info!("I'm still alive! {i}");
-        i = i.wrapping_add(1);
+        Timer::after(Duration::MAX).await;
     }
 }
