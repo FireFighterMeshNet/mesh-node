@@ -28,14 +28,22 @@ esp-wifi = { version = "0.9.1", features = ["esp32",
     "embassy-net", "async",
     "utils", "ipv4", "tcp", "udp", "dhcpv4",
     "wifi",
+    "sniffer",
+    "log",
     # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
 ] }
+heapless = "0.8.0"
 log = { version = "0.4.21" }
 static_cell = "2.1.0"
 
+[patch.crates-io]
+# change back to regular release after <https://github.com/embassy-rs/embassy/pull/3198> is included
+#embassy-net = { git = "https://github.com/embassy-rs/embassy" }
+#embassy-time = { git = "https://github.com/embassy-rs/embassy" }
+#embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
+
+
 [profile.dev]
-# Rust debug is too slow.
-# For debug builds always builds with some optimization
 opt-level = "s"
 # esp_wifi is broken with overflow-checks
 overflow-checks = false
@@ -46,7 +54,7 @@ debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
-opt-level = 's'
+opt-level = "z"
 overflow-checks = false
 
 [build-dependencies]

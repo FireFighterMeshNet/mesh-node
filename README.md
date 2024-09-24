@@ -7,11 +7,13 @@ for installation instructions.
 Choose the `no_std` option for the `exp32` with `Xtensa` architecture.
 
 # Flash and run
-After following installation you should have `cargo` and `espflash` installed so `cargo run --release` when the board is plugged in should work. If it hangs on `Connecting...` cancel the command (`ctrl-c`) and try again.
+After following installation you should have `cargo` and `espflash` installed so `cargo run --release` when the board is plugged in should work. If it hangs on `Connecting...` cancel the command (`Ctrl-c`) and try again or try pressing the `RESET` button of the development board.
 
 ## Configuration
-The following environment variables should be set:
-- `RNG_SEED` to a random `u64`.
+### Environment Variables
+- `STA_SSID`: SSID of WIFI STA connection.
+- `STA_PASSWORD`: password for WIFI STA connection
+- `RNG_SEED`:  (optional) deterministic override of random seed.
 
 # Troubleshooting
 - Stack overflow hangs instead of crashing and restarting even with watchdog enabled.
