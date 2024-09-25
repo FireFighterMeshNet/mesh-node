@@ -4,11 +4,11 @@
 
 // extern crate alloc;
 
-use core::{future::Future, pin::pin, str};
+use core::str;
 use embassy_net::{
-    tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4,
+    tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
 };
-use embassy_time::{Duration, Timer, WithTimeout};
+use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
@@ -49,14 +49,14 @@ async fn boot_button_reply(gpio0: GpioPin<0>) {
 
 /// Run the AP network stack so the WifiAP responds to network events.
 #[embassy_executor::task]
-async fn ap_task(stack: &'static Stack<WifiDevice<'static, WifiApDevice>>) {
-    stack.run().await
+async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) {
+    runner.run().await
 }
 
 /// Run the STA network stack so the WifiSta responds to network events.
 #[embassy_executor::task]
-async fn sta_task(stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>) {
-    stack.run().await
+async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
+    runner.run().await
 }
 
 /// Handle wifi (both AP and STA).
@@ -161,19 +161,10 @@ async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
         );
         log::info!("Flushing with close ...");
         socket.close();
-        err!({
-            let mut fut = pin!(socket.flush());
-            core::future::poll_fn(move |cx| {
-                fut.as_ref();
-                log::info!("flush poll");
-                fut.as_mut().poll(cx)
-            })
-            .with_timeout(Duration::from_secs(10))
-            .await
-        });
+        err!(socket.flush().await);
         log::info!("Flushed and closed");
         socket.abort();
-        err!(socket.flush().with_timeout(Duration::from_secs(10)).await);
+        err!(socket.flush().await);
     }
 }
 
@@ -210,35 +201,29 @@ async fn main(spawn: embassy_executor::Spawner) {
     let wifi = peripherals.WIFI;
     let (wifi_ap_interface, wifi_sta_interface, controller) =
         esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
-    let ap_stack = make_static!(
-        Stack<WifiDevice<'_, WifiApDevice>>,
-        Stack::new(
-            wifi_ap_interface,
-            embassy_net::Config::ipv4_static(StaticConfigV4 {
-                address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24),
-                gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
-                dns_servers: Default::default(),
-            }),
-            make_static!(StackResources::<3>, StackResources::<3>::new()),
-            rng_seed
-        )
+    let (ap_stack, ap_runner) = embassy_net::new(
+        wifi_ap_interface,
+        embassy_net::Config::ipv4_static(StaticConfigV4 {
+            address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24),
+            gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
+            dns_servers: Default::default(),
+        }),
+        make_static!(StackResources::<3>, StackResources::<3>::new()),
+        rng_seed,
     );
-    let sta_stack = make_static!(
-        Stack<WifiDevice<'_, WifiStaDevice>>,
-        Stack::new(
-            wifi_sta_interface,
-            embassy_net::Config::ipv4_static(StaticConfigV4 {
-                address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 0, 53), 24),
-                gateway: Some(Ipv4Address::new(192, 168, 0, 1)),
-                dns_servers: Default::default(),
-            }),
-            make_static!(StackResources::<3>, StackResources::<3>::new()),
-            rng_seed
-        )
+    let (sta_stack, sta_runner) = embassy_net::new(
+        wifi_sta_interface,
+        embassy_net::Config::ipv4_static(StaticConfigV4 {
+            address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 0, 53), 24),
+            gateway: Some(Ipv4Address::new(192, 168, 0, 1)),
+            dns_servers: Default::default(),
+        }),
+        make_static!(StackResources::<3>, StackResources::<3>::new()),
+        rng_seed,
     );
 
-    spawn.must_spawn(ap_task(ap_stack));
-    spawn.must_spawn(sta_task(sta_stack));
+    spawn.must_spawn(ap_task(ap_runner));
+    spawn.must_spawn(sta_task(sta_runner));
     spawn.must_spawn(connection(controller));
     spawn.must_spawn(boot_button_reply(io.pins.gpio0));
 

@@ -38,9 +38,10 @@ static_cell = "2.1.0"
 
 [patch.crates-io]
 # change back to regular release after <https://github.com/embassy-rs/embassy/pull/3198> is included
-#embassy-net = { git = "https://github.com/embassy-rs/embassy" }
-#embassy-time = { git = "https://github.com/embassy-rs/embassy" }
-#embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
+embassy-net = { git = "https://github.com/embassy-rs/embassy" }
+embassy-net-driver = { git = "https://github.com/embassy-rs/embassy" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
 
 
 [profile.dev]
