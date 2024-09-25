@@ -38,7 +38,7 @@ macro_rules! err {
     };
     (%$e:expr) => {
         if let Err(e) = $e {
-            log::error!("[{}:{}] {e:?}", file!(), line!())
+            log::error!("[{}:{}] {e}", file!(), line!())
         }
     };
 }

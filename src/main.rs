@@ -64,6 +64,7 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
 async fn connection(mut controller: WifiController<'static>) {
     // Setup initial configuration
     // Configuration can also be changed after start if it needs to.
+    // Access point with a password is not supported yet by `esp-wifi` see <https://github.com/esp-rs/esp-wifi-sys/issues/471>.
     let ap_conf = esp_wifi::wifi::AccessPointConfiguration {
         ssid: "esp32-test".try_into().unwrap(),
         ..Default::default()
@@ -78,7 +79,7 @@ async fn connection(mut controller: WifiController<'static>) {
 
     log::info!("Starting WIFI");
     controller.start().await.unwrap();
-    err!(%controller.connect().await);
+    err!(controller.connect().await);
     log::info!("Started WIFI");
     let mut state = esp_wifi::wifi::get_ap_state();
     let scan_res = controller.scan_n::<3>().await.unwrap().0;
