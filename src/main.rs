@@ -317,7 +317,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         .await
         .expect("ap up");
 
-    // Give up on sta after enough tries. Probably failed to connect because of password or the target ssid is missing.
+    // Give up on sta after a while. Probably failed to connect because of password or the target ssid is missing.
     err!(
         sta_stack
             .wait_link_up()

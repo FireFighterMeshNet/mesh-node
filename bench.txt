@@ -1,0 +1,95 @@
+tx buffer size : 12
+
+using write_all
+(.rodata)
+100x 1024 bytes per 1557ms (66kB/s)
+100x 1024 bytes per 1630ms (63kB/s)
+100x 1024 bytes per 1596ms (64kB/s)
+100x 16384 bytes per 25887ms (64kB/s)
+100x 16384 bytes per 26626ms (61kB/s)
+
+(ram)
+100x 16384 bytes per 26119ms (63kB/s)
+100x 16384 bytes per 28677ms
+
+tx buffer size : 14
+100x 16384 bytes per 25933ms
+100x 16384 bytes per 25880ms (63kB/s)
+
+less logging:
+100x 16384 bytes per 24950ms (66kB/s)
+
+even less logging:
+100x 16384 bytes per 24933ms
+
+# By setting with `cfg.toml` located in the same directory as the `target` file (see <https://github.com/jamesmunns/toml-cfg/blob/2f92bff394657bebffd6233e04d57c5282d561ed/src/lib.rs#L229-L254>)
+# e.g. if target is in `%userprofile\.cargo\target` then the `cfg.toml` should be at `%userprofile\.cargo\cfg.toml`
+# see if the setting were read with $env:TOML_CFG="require_cfg_present" from `toml-cfg` crate
+# settings based on <https://github.com/esp-rs/esp-wifi-sys/pull/430> and <https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/wifi.html>
+
+100x 16384 bytes per 4971ms (329.591kB/s)
+100x 16384 bytes per 5201ms
+100x 16384 bytes per 4973ms
+
+after changing config to
+```
+[esp-wifi]
+rx_queue_size = 32
+tx_queue_size = 16
+static_rx_buf_num = 16
+dynamic_rx_buf_num = 64
+dynamic_tx_buf_num = 64
+ampdu_rx_enable = 1
+ampdu_tx_enable = 1
+rx_ba_win = 2
+max_burst_size = 8
+```
+100x 16384 bytes per 4630ms (353.866kB/s) with
+100x 16384 bytes per 4631ms
+
+comment rx_queue_size
+100x 16384 bytes per 4966ms
+100x 16384 bytes per 4979ms
+100x 16384 bytes per 4672ms
+100x 16384 bytes per 4875ms
+
+comment tx_queue_size
+100x 16384 bytes per 4966ms
+16384 bytes per 4896ms
+
+comment static_rx_buf_num
+100x 16384 bytes per 5090ms
+100x 16384 bytes per 5056ms
+100x 16384 bytes per 4743ms
+
+comment dynamic_rx_buf_num
+100x 16384 bytes per 4995ms
+100x 16384 bytes per 4720ms
+100x 16384 bytes per 4690ms
+
+comment dynamic_tx_buf_num
+100x 16384 bytes per 5222ms
+100x 16384 bytes per 4651ms
+100x 16384 bytes per 4816ms
+
+comment all but max_burst_size
+100x 16384 bytes per 4797ms
+100x 16384 bytes per 4928ms
+100x 16384 bytes per 4804ms
+100x 16384 bytes per 4926ms
+
+uncomment amsdu_tx_enabled
+100x 16384 bytes per 24832ms
+100x 16384 bytes per 24569ms
+
+opt level 3 (instead of z)
+100x 16384 bytes per 6299ms
+100x 16384 bytes per 5350ms
+100x 16384 bytes per 5794ms
+
+wait for a few hours
+100x 16384 bytes per 5930ms
+100x 16384 bytes per 5406ms
+100x 16384 bytes per 5206ms
+
+So far tests seem to indicate that `max_burst_size = 8` is important.
