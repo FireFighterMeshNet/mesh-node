@@ -11,8 +11,7 @@ After following installation you should have `cargo` and `espflash` installed so
 
 ## Configuration
 ### Environment Variables
-- `STA_SSID`: SSID of WIFI STA connection.
-- `STA_PASSWORD`: password for WIFI STA connection
+- `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 
 # Troubleshooting

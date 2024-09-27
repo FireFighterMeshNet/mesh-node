@@ -34,6 +34,7 @@ esp-wifi = { version = "0.9.1", features = ["esp32",
 ] }
 heapless = "0.8.0"
 log = { version = "0.4.21" }
+rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 static_cell = "2.1.0"
 
 [patch.crates-io]

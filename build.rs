@@ -7,12 +7,9 @@ use std::{
     path::Path,
 };
 
-fn main() {
-    println!("cargo::rerun-if-changed=build.rs");
+/// Read `RNG_SEED`.
+fn rng_seed() -> String {
     println!("cargo::rerun-if-env-changed=RNG_SEED");
-
-    let out_dir = env::var_os("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("const_gen.rs");
 
     let default_rng_seed = const_declaration!(
         /// RNG seed set at build time.
@@ -35,6 +32,16 @@ fn main() {
             default_rng_seed
         }
     };
+    const_declarations
+}
 
-    fs::write(dest_path, const_declarations).unwrap();
+fn main() {
+    println!("cargo::rerun-if-changed=build.rs");
+
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("const_gen.rs");
+
+    let rng_seed_decl = rng_seed();
+
+    fs::write(dest_path, rng_seed_decl).unwrap();
 }
