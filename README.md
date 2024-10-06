@@ -14,6 +14,9 @@ After following installation you should have `cargo` and `espflash` installed so
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 
+# Wifishark
+- Follow [these instructions](https://github.com/Easyoakland/esp-hal/blob/raw-ieee/extras/esp-wifishark/README.md) to build, install, and use the wireshark extcap.
+
 # Troubleshooting
 - Stack overflow hangs instead of crashing and restarting even with watchdog enabled.
     - <https://github.com/espressif/esp-idf/issues/10110>
