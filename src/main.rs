@@ -7,11 +7,12 @@
 use core::{
     net::{Ipv4Addr, SocketAddrV4},
     str,
+    sync::atomic::AtomicU8,
 };
 use embassy_net::{
     tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
 };
-use embassy_time::{Duration, Instant, Timer, WithTimeout};
+use embassy_time::{Duration, Instant, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
@@ -70,6 +71,11 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
     runner.run().await
 }
 
+/// Output packet's data as expected by the wifi-shark extcap at `INFO` level.
+fn log_packet(data: &[u8]) {
+    log::info!("@WIFIRAWFRAME {:?}", data)
+}
+
 /// Handle wifi (both AP and STA).
 #[embassy_executor::task]
 async fn connection(
@@ -118,7 +124,6 @@ async fn connection(
             match controller.connect().await {
                 Ok(()) => {
                     log::info!("connected to node");
-                    Timer::after_secs(2).await;
                     err!(
                         sta_socket
                             .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
@@ -147,16 +152,23 @@ async fn connection(
     } else {
         log::warn!("other node not found");
     }
-    // let mut sniffer = controller.take_sniffer().unwrap();
-    // sniffer.set_promiscuous_mode(true).unwrap();
-    // sniffer.set_receive_cb(|pkt| {
-    //     log::info!(
-    //         "ty: {:?}, len: {}, data: {:?}",
-    //         pkt.frame_type,
-    //         pkt.len,
-    //         pkt.data
-    //     )
-    // });
+    let mut sniffer = controller.take_sniffer().unwrap();
+    sniffer.set_promiscuous_mode(true).unwrap();
+    sniffer.set_receive_cb(|pkt| {
+        // Only log some of packets to avoid overload.
+        // Otherwise the network stack starts failing because logging takes too long.
+        static CNT: AtomicU8 = AtomicU8::new(0);
+        let one_in_ten = CNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        if one_in_ten == 0 {
+            // log::info!("ty: {:?}, len: {}", pkt.frame_type, pkt.len);
+            log_packet(pkt.data);
+        } else {
+            CNT.store(
+                (one_in_ten + 1).rem_euclid(11),
+                core::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    });
     loop {
         controller
             .wait_for_events((WifiEvent::ApStart | WifiEvent::ApStop).into(), false)
