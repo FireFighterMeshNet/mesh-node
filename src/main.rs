@@ -5,6 +5,7 @@
 // extern crate alloc;
 
 use core::{
+    marker::PhantomData,
     net::{Ipv4Addr, SocketAddrV4},
     str,
     sync::atomic::AtomicU8,
@@ -12,7 +13,7 @@ use core::{
 use embassy_net::{
     tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
 };
-use embassy_time::{Duration, Instant, WithTimeout};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
@@ -26,7 +27,19 @@ use esp_hal::{
 use esp_println::dbg;
 use esp_wifi::{
     self,
-    wifi::{Configuration, WifiApDevice, WifiController, WifiDevice, WifiEvent, WifiStaDevice},
+    wifi::{
+        Configuration, PromiscuousPkt, Sniffer, WifiApDevice, WifiController, WifiDevice,
+        WifiEvent, WifiStaDevice,
+    },
+};
+use ieee80211::{
+    common::CapabilitiesInformation,
+    element_chain,
+    elements::{DSSSParameterSetElement, RawIEEE80211Element, SSIDElement, VendorSpecificElement},
+    mac_parser::MACAddress,
+    mgmt_frame::BeaconFrame,
+    scroll::Pwrite,
+    supported_rates,
 };
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
 
@@ -44,6 +57,9 @@ mod consts {
     } else {
         "esp-mesh-default-ssid"
     };
+
+    /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>
+    pub const ESPRESSIF_OUI: &'static [u8] = [0x10, 0x06, 0x1C].as_slice();
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -76,11 +92,105 @@ fn log_packet(data: &[u8]) {
     log::info!("@WIFIRAWFRAME {:?}", data)
 }
 
+/// Periodic transmit of beacon with custom vendor data.
+#[embassy_executor::task]
+async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
+    // Buffer for beacon body
+    let mut beacon = [0u8; 300];
+    let vendor = VendorSpecificElement::new_prefixed(
+        // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
+        consts::ESPRESSIF_OUI,
+        [1u8, 2, 3, 0xde, 0xad, 0xbe, 0xef, 253, 254, 255].as_slice(),
+    );
+    let length = beacon
+        .pwrite(
+            BeaconFrame {
+                header: ieee80211::mgmt_frame::ManagementFrameHeader {
+                    transmitter_address: source_mac,
+                    bssid: source_mac,
+                    receiver_address: MACAddress([0xff; 6]), // multicast to all
+                    ..Default::default()
+                },
+                body: ieee80211::mgmt_frame::body::BeaconLikeBody {
+                    timestamp: 0,
+                    beacon_interval: 100,
+                    capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is ap
+                    elements: element_chain! {
+                        SSIDElement::new(consts::SSID).unwrap(),
+                        supported_rates![
+                            1 B,
+                            2 B,
+                            5.5 B,
+                            11 B,
+                            6,
+                            9,
+                            12,
+                            18
+                        ],
+                        DSSSParameterSetElement {current_channel: 1},
+                        RawIEEE80211Element { // Traffic indication map not supported by ieee80211 yet
+                            tlv_type: 5,
+                            slice: [0x01,0x02,0x00,0x00].as_slice(),
+                            _phantom: PhantomData
+                        },
+                        vendor
+                    },
+                    _phantom: PhantomData,
+                },
+            },
+            0,
+        )
+        .unwrap();
+    log::info!("sending vendor-beacons");
+    loop {
+        // Send raw frame using wifi-stack's sequence number.
+        // Will give an `ESP_ERR_INVALID_ARG` if sending for most configurations if `use_internal_seq_num` != true when wi-fi is initialized.
+        // See <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#side-effects-to-avoid-in-different-scenarios>
+        sniffer
+            .send_raw_frame(false, &beacon[0..length], true)
+            .unwrap();
+        Timer::after_millis(100).await;
+    }
+}
+
+fn sniffer_callback(pkt: PromiscuousPkt) {
+    let frame = ieee80211::match_frames! {pkt.data, beacon = BeaconFrame => { beacon }};
+    match frame {
+        Ok(beacon) => {
+            if beacon.ssid() == Some(consts::SSID) {
+                for field in beacon
+                    .elements
+                    .get_matching_elements::<ieee80211::elements::VendorSpecificElement>()
+                {
+                    log::warn!("{:?}", field);
+                }
+            }
+        }
+        Err(_) => (), // ignore frame type not matched
+    }
+    // Only log some of packets to avoid overload.
+    // Otherwise the network stack starts failing because logging takes too long.
+    static CNT: AtomicU8 = AtomicU8::new(0);
+    let cnt = CNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    if cnt == 0 {
+        // log::info!("ty: {:?}, len: {}", pkt.frame_type, pkt.len);
+        // The last 4 bytes are the frame check sequence, which wireshark doesn't check and we don't care about.
+        log_packet(&pkt.data[..pkt.data.len().saturating_sub(4)]);
+    } else {
+        CNT.store(
+            (cnt + 1).rem_euclid(110),
+            core::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
 /// Handle wifi (both AP and STA).
 #[embassy_executor::task]
 async fn connection(
+    spawn: embassy_executor::Spawner,
     mut controller: WifiController<'static>,
     sta_socket: &'static mut TcpSocket<'static>,
+    ap_mac: MACAddress,
 ) {
     // Setup initial configuration
     // Configuration can also be changed after start if it needs to.
@@ -154,21 +264,10 @@ async fn connection(
     }
     let mut sniffer = controller.take_sniffer().unwrap();
     sniffer.set_promiscuous_mode(true).unwrap();
-    sniffer.set_receive_cb(|pkt| {
-        // Only log some of packets to avoid overload.
-        // Otherwise the network stack starts failing because logging takes too long.
-        static CNT: AtomicU8 = AtomicU8::new(0);
-        let one_in_ten = CNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        if one_in_ten == 0 {
-            // log::info!("ty: {:?}, len: {}", pkt.frame_type, pkt.len);
-            log_packet(pkt.data);
-        } else {
-            CNT.store(
-                (one_in_ten + 1).rem_euclid(11),
-                core::sync::atomic::Ordering::SeqCst,
-            );
-        }
-    });
+    sniffer.set_receive_cb(sniffer_callback);
+
+    spawn.must_spawn(beacon_vendor_tx(sniffer, ap_mac));
+
     loop {
         controller
             .wait_for_events((WifiEvent::ApStart | WifiEvent::ApStop).into(), false)
@@ -211,9 +310,9 @@ async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
                     log::info!("EOF");
                     break;
                 }
-                Ok(len) => {
+                Ok(_len) => {
                     // let received = str::from_utf8(&buffer[0..len]).unwrap();
-                    log::info!("read {}, {:?}", len, &buffer[0..4]);
+                    // log::info!("read {}, {:?}", len, &buffer[0..4]);
                     if buffer
                         .chunks_exact(4)
                         .filter(|x| x == b"\r\r\n\n")
@@ -285,6 +384,8 @@ async fn main(spawn: embassy_executor::Spawner) {
     let wifi = peripherals.WIFI;
     let (wifi_ap_interface, wifi_sta_interface, controller) =
         esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
+    let ap_mac = wifi_ap_interface.mac_address();
+    // let sta_mac = wifi_sta_interface.mac_address();
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv4_static(StaticConfigV4 {
@@ -318,7 +419,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             )
         );
         sta_socket.set_timeout(Some(Duration::from_secs(10)));
-        spawn.must_spawn(connection(controller, sta_socket));
+        spawn.must_spawn(connection(spawn, controller, sta_socket, ap_mac.into()));
     }
     spawn.must_spawn(boot_button_reply(io.pins.gpio0));
 
