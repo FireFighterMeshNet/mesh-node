@@ -42,3 +42,30 @@ macro_rules! err {
         }
     };
 }
+
+/// Prototyping unwraps that should be handled when the design is done.
+pub trait UnwrapTodo {
+    type T;
+    fn todo(self) -> Self::T;
+    fn todo_msg(self, msg: &str) -> Self::T;
+}
+impl<T> UnwrapTodo for Option<T> {
+    type T = T;
+
+    fn todo(self) -> Self::T {
+        self.unwrap_or_else(|| todo!())
+    }
+    fn todo_msg(self, msg: &str) -> Self::T {
+        self.unwrap_or_else(|| todo!("{msg}"))
+    }
+}
+impl<T, E> UnwrapTodo for Result<T, E> {
+    type T = T;
+
+    fn todo(self) -> Self::T {
+        self.unwrap_or_else(|_| todo!())
+    }
+    fn todo_msg(self, msg: &str) -> Self::T {
+        self.unwrap_or_else(|_| todo!("{msg}"))
+    }
+}

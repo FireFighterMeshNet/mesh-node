@@ -5,6 +5,7 @@
 // extern crate alloc;
 
 use core::{
+    borrow::Borrow,
     marker::PhantomData,
     net::{Ipv4Addr, SocketAddrV4},
     str,
@@ -23,6 +24,7 @@ use esp_hal::{
     rng::Rng,
     system::SystemControl,
     timer::timg::TimerGroup,
+    xtensa_lx::mutex::Mutex as _,
 };
 use esp_println::dbg;
 use esp_wifi::{
@@ -32,22 +34,24 @@ use esp_wifi::{
         WifiEvent, WifiStaDevice,
     },
 };
+use heapless::{Entry, FnvIndexMap};
 use ieee80211::{
     common::CapabilitiesInformation,
     element_chain,
-    elements::{DSSSParameterSetElement, RawIEEE80211Element, SSIDElement, VendorSpecificElement},
+    elements::{SSIDElement, VendorSpecificElement},
     mac_parser::MACAddress,
     mgmt_frame::BeaconFrame,
     scroll::Pwrite,
-    supported_rates,
 };
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
+use util::UnwrapTodo;
+
+type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
 
 /// Unsorted utilities.
 #[macro_use]
 pub mod util;
 
-/// Build time generated constants.
 mod consts {
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
@@ -60,6 +64,9 @@ mod consts {
 
     /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>
     pub const ESPRESSIF_OUI: &'static [u8] = [0x10, 0x06, 0x1C].as_slice();
+
+    /// Maximum number of nodes supported in the network at once.
+    pub const MAX_NODES: usize = 5;
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -97,11 +104,6 @@ fn log_packet(data: &[u8]) {
 async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     // Buffer for beacon body
     let mut beacon = [0u8; 300];
-    let vendor = VendorSpecificElement::new_prefixed(
-        // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
-        consts::ESPRESSIF_OUI,
-        [1u8, 2, 3, 0xde, 0xad, 0xbe, 0xef, 253, 254, 255].as_slice(),
-    );
     let length = beacon
         .pwrite(
             BeaconFrame {
@@ -117,23 +119,11 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
                     capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is ap
                     elements: element_chain! {
                         SSIDElement::new(consts::SSID).unwrap(),
-                        supported_rates![
-                            1 B,
-                            2 B,
-                            5.5 B,
-                            11 B,
-                            6,
-                            9,
-                            12,
-                            18
-                        ],
-                        DSSSParameterSetElement {current_channel: 1},
-                        RawIEEE80211Element { // Traffic indication map not supported by ieee80211 yet
-                            tlv_type: 5,
-                            slice: [0x01,0x02,0x00,0x00].as_slice(),
-                            _phantom: PhantomData
-                        },
-                        vendor
+                        VendorSpecificElement::new_prefixed(
+                            // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
+                            consts::ESPRESSIF_OUI,
+                            [1u8, 2, 3, 0xde, 0xad, 0xbe, 0xef, 253, 254, 255].as_slice(),
+                        )
                     },
                     _phantom: PhantomData,
                 },
@@ -153,7 +143,25 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     }
 }
 
-fn sniffer_callback(pkt: PromiscuousPkt) {
+/// Value of data for a single node.
+#[derive(Debug, Clone)]
+struct NodeData {
+    /// Distance from root. Root is 0. Root's children is 1, etc.
+    level: u8,
+}
+
+/// Table of info per node.
+#[derive(Debug, Clone)]
+struct NodeTable {
+    // `FnvIndexMap` has to be a power of two in size.
+    pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
+}
+
+static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
+    map: FnvIndexMap::new(),
+});
+
+pub fn sniffer_callback(pkt: PromiscuousPkt) {
     let frame = ieee80211::match_frames! {pkt.data, beacon = BeaconFrame => { beacon }};
     match frame {
         Ok(beacon) => {
@@ -162,7 +170,21 @@ fn sniffer_callback(pkt: PromiscuousPkt) {
                     .elements
                     .get_matching_elements::<ieee80211::elements::VendorSpecificElement>()
                 {
-                    log::warn!("{:?}", field);
+                    let Some(&level) = field.get_payload().get(6) else {
+                        log::warn!("bad beacon field? {:?}", field);
+                        continue;
+                    };
+                    STATE.borrow().lock(|table| {
+                        match table.map.entry(beacon.header.bssid) {
+                            Entry::Occupied(mut occupied_entry) => {
+                                occupied_entry.get_mut().level = level
+                            }
+                            Entry::Vacant(vacant_entry) => {
+                                vacant_entry.insert(NodeData { level }).todo();
+                            }
+                        }
+                        log::info!("{:?}", table);
+                    })
                 }
             }
         }
@@ -251,7 +273,7 @@ async fn connection(
                     err!(sta_socket.write_all(b"\r\n\r\n").await);
                     let mut buf = [0u8; 1024];
                     err!(sta_socket.read(&mut buf).await);
-                    let received = str::from_utf8(&buf).unwrap();
+                    let received = str::from_utf8(&buf).todo();
                     log::info!("{received}");
 
                     break;
@@ -262,7 +284,7 @@ async fn connection(
     } else {
         log::warn!("other node not found");
     }
-    let mut sniffer = controller.take_sniffer().unwrap();
+    let mut sniffer = controller.take_sniffer().expect("first sniffer take");
     sniffer.set_promiscuous_mode(true).unwrap();
     sniffer.set_receive_cb(sniffer_callback);
 
