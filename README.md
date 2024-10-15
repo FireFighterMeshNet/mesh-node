@@ -13,6 +13,7 @@ After following installation you should have `cargo` and `espflash` installed so
 ### Environment Variables
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
+- `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
 
 # Wifishark
 - Follow [these instructions](https://github.com/Easyoakland/esp-hal/blob/raw-ieee/extras/esp-wifishark/README.md) to build, install, and use the wireshark extcap.

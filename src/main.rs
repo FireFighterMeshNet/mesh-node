@@ -10,6 +10,7 @@ use core::{
     net::{Ipv4Addr, SocketAddrV4},
     str,
     sync::atomic::AtomicU8,
+    u8,
 };
 use embassy_net::{
     tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
@@ -34,7 +35,7 @@ use esp_wifi::{
         WifiEvent, WifiStaDevice,
     },
 };
-use heapless::{Entry, FnvIndexMap};
+use heapless::FnvIndexMap;
 use ieee80211::{
     common::CapabilitiesInformation,
     element_chain,
@@ -44,6 +45,7 @@ use ieee80211::{
     scroll::Pwrite,
 };
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
+use scroll::Pread;
 use util::UnwrapTodo;
 
 type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
@@ -67,6 +69,9 @@ mod consts {
 
     /// Maximum number of nodes supported in the network at once.
     pub const MAX_NODES: usize = 5;
+
+    /// Protocol version. Currently unchecked.
+    pub const PROT_VERSION: u8 = 0;
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -103,7 +108,8 @@ fn log_packet(data: &[u8]) {
 #[embassy_executor::task]
 async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     // Buffer for beacon body
-    let mut beacon = [0u8; 300];
+    let mut beacon = [0u8; 256];
+    let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.me.borrow().into());
     let length = beacon
         .pwrite(
             BeaconFrame {
@@ -122,7 +128,7 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
                         VendorSpecificElement::new_prefixed(
                             // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
                             consts::ESPRESSIF_OUI,
-                            [1u8, 2, 3, 0xde, 0xad, 0xbe, 0xef, 253, 254, 255].as_slice(),
+                            data,
                         )
                     },
                     _phantom: PhantomData,
@@ -143,21 +149,109 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+enum TreePos {
+    /// Above this node in tree.
+    Ancestor,
+    /// Below this node in tree.
+    Descendant,
+    /// Same level or below sibling in tree.
+    Sibling,
+    /// Not connected to this node.
+    #[default]
+    Disconnected,
+}
 /// Value of data for a single node.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 struct NodeData {
+    postion: TreePos,
+    /// Version of this protocol the node is running.
+    version: u8,
     /// Distance from root. Root is 0. Root's children is 1, etc.
     level: u8,
 }
+/// Beacon message per node.
+#[derive(Debug, Clone)]
+struct NodeDataBeaconMsg {
+    version: u8,
+    level: u8,
+}
 
-/// Table of info per node.
+impl scroll::ctx::TryIntoCtx for NodeDataBeaconMsg {
+    type Error = scroll::Error;
+
+    fn try_into_ctx(self, dst: &mut [u8], _ctx: ()) -> Result<usize, Self::Error> {
+        let offset = &mut 0;
+
+        dst.gwrite_with(self.version, offset, scroll::NETWORK)?;
+        dst.gwrite_with(self.level, offset, scroll::NETWORK)?;
+
+        Ok(*offset)
+    }
+}
+impl scroll::ctx::TryFromCtx<'_> for NodeDataBeaconMsg {
+    type Error = scroll::Error;
+
+    fn try_from_ctx(from: &[u8], _ctx: ()) -> Result<(Self, usize), Self::Error> {
+        let offset = &mut 0;
+
+        let version = from.gread_with(offset, scroll::NETWORK)?;
+        let level = from.gread_with(offset, scroll::NETWORK)?;
+
+        Ok((Self { version, level }, *offset))
+    }
+}
+impl scroll::ctx::MeasureWith<()> for NodeDataBeaconMsg {
+    fn measure_with(&self, _: &()) -> usize {
+        size_of::<Self>()
+    }
+}
+impl From<&NodeDataBeaconMsg> for NodeData {
+    fn from(value: &NodeDataBeaconMsg) -> Self {
+        Self {
+            version: value.version,
+            level: value.level,
+            ..Default::default()
+        }
+    }
+}
+impl From<&NodeData> for NodeDataBeaconMsg {
+    fn from(value: &NodeData) -> Self {
+        Self {
+            version: value.version,
+            level: value.level,
+        }
+    }
+}
+
+impl NodeData {
+    pub const fn new_disconnected() -> Self {
+        NodeData {
+            postion: TreePos::Disconnected,
+            version: consts::PROT_VERSION,
+            level: u8::MAX,
+        }
+    }
+}
+
+/// Table of all mesh info.
 #[derive(Debug, Clone)]
 struct NodeTable {
+    /// Data for this node.
+    pub me: NodeData,
     // `FnvIndexMap` has to be a power of two in size.
+    /// The data for other nodes.
     pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
 }
 
 static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
+    me: {
+        let mut out = NodeData::new_disconnected();
+        if let Some(level) = consts::TREE_LEVEL {
+            out.level = level;
+        }
+        out
+    },
     map: FnvIndexMap::new(),
 });
 
@@ -170,21 +264,20 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
                     .elements
                     .get_matching_elements::<ieee80211::elements::VendorSpecificElement>()
                 {
-                    let Some(&level) = field.get_payload().get(6) else {
+                    let Some(payload) = field.get_payload_if_prefix_matches(consts::ESPRESSIF_OUI)
+                    else {
+                        log::debug!("unmatched beacon field: {:?}", field);
+                        continue;
+                    };
+                    let Ok(data) = payload.pread::<NodeDataBeaconMsg>(0) else {
                         log::warn!("bad beacon field? {:?}", field);
                         continue;
                     };
-                    STATE.borrow().lock(|table| {
-                        match table.map.entry(beacon.header.bssid) {
-                            Entry::Occupied(mut occupied_entry) => {
-                                occupied_entry.get_mut().level = level
-                            }
-                            Entry::Vacant(vacant_entry) => {
-                                vacant_entry.insert(NodeData { level }).todo();
-                            }
-                        }
-                        log::info!("{:?}", table);
-                    })
+                    let data = data.borrow().into();
+                    STATE
+                        .borrow()
+                        .lock(|table| table.map.insert(beacon.header.bssid, data))
+                        .todo();
                 }
             }
         }

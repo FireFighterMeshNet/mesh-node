@@ -847,6 +847,7 @@ dependencies = [
  "ieee80211",
  "log",
  "rand",
+ "scroll",
  "static_cell",
 ]
 
