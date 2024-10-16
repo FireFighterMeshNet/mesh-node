@@ -1,9 +1,9 @@
 [target.xtensa-esp32-none-elf]
 runner = "espflash flash --monitor"
 
-
 [env]
-ESP_LOGLEVEL = "INFO"
+ESP_LOG = "INFO"
+ESP_WIFI_MAX_BURST_SIZE = "8"
 
 [build]
 rustflags = [
@@ -12,7 +12,6 @@ rustflags = [
     "-C", "link-arg=-Tlinkall.x",
     "-C", "link-arg=-Trom_functions.x",
 ]
-
 target = "xtensa-esp32-none-elf"
 
 [unstable]

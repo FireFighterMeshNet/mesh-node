@@ -14,19 +14,20 @@ embassy-net = { version = "0.4.0", features = [
 # embassy-sync = "0.6.0"
 embassy-time = { version = "0.3.2", features = ["generic-queue"] }
 embedded-io-async = "0.6.1"
-esp-alloc = "0.4.0"
+esp-alloc = "0.5.0"
 esp-backtrace = { version = "0.14.0", features = [
     "esp32",
     "exception-handler",
     "panic-handler",
     "println",
 ] }
-esp-hal = { version = "0.20.1", features = ["esp32", "async", "log"] }
-esp-hal-embassy = { version = "0.3.0", features = ["esp32", "log"] }
-esp-println = { version = "0.11.0", features = ["esp32", "log"] }
-esp-wifi = { version = "0.9.1", features = ["esp32",
+esp-hal = { version = "0.21.0", features = ["esp32", "log"] }
+esp-hal-embassy = { version = "0.4.0", features = ["esp32", "log"] }
+esp-println = { version = "0.12.0", features = ["esp32", "log"] }
+esp-wifi = { version = "0.10.1", features = ["esp32",
     "embassy-net", "async",
-    "utils", "ipv4", "tcp", "udp",
+    # "utils",
+    "ipv4", "tcp", "udp",
     # "dhcpv4",
     "wifi",
     "sniffer",
@@ -66,3 +67,7 @@ overflow-checks = false
 
 [build-dependencies]
 const-gen = "1.6.5"
+
+[features]
+# Dump raw ieee80211 packets with sniffer. Decreases wifi performance.
+dump-packets = []

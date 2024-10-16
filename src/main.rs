@@ -19,11 +19,8 @@ use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
-    clock::ClockControl,
     gpio::{GpioPin, Input, Io},
-    peripherals::Peripherals,
     rng::Rng,
-    system::SystemControl,
     timer::timg::TimerGroup,
     xtensa_lx::mutex::Mutex as _,
 };
@@ -101,7 +98,9 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
 
 /// Output packet's data as expected by the wifi-shark extcap at `INFO` level.
 fn log_packet(data: &[u8]) {
-    log::info!("@WIFIRAWFRAME {:?}", data)
+    if cfg!(feature = "dump-packets") {
+        log::info!("@WIFIRAWFRAME {:?}", data)
+    }
 }
 
 /// Periodic transmit of beacon with custom vendor data.
@@ -142,9 +141,10 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
         // Send raw frame using wifi-stack's sequence number.
         // Will give an `ESP_ERR_INVALID_ARG` if sending for most configurations if `use_internal_seq_num` != true when wi-fi is initialized.
         // See <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#side-effects-to-avoid-in-different-scenarios>
-        sniffer
-            .send_raw_frame(false, &beacon[0..length], true)
-            .unwrap();
+        if let Err(e) = sniffer.send_raw_frame(false, &beacon[0..length], true) {
+            log::error!("Failed to send beacon: {e:?}")
+        }
+
         Timer::after_millis(100).await;
     }
 }
@@ -283,6 +283,7 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
         }
         Err(_) => (), // ignore frame type not matched
     }
+
     // Only log some of packets to avoid overload.
     // Otherwise the network stack starts failing because logging takes too long.
     static CNT: AtomicU8 = AtomicU8::new(0);
@@ -340,7 +341,7 @@ async fn connection(
     if let Some(other_node) = scan_res.first() {
         conf.as_mixed_conf_mut().0.bssid = Some(other_node.bssid);
         controller.set_configuration(&conf).unwrap();
-        const EXP: u32 = 14;
+        const EXP: u32 = 13;
         let buf = make_static!(
             [u8; 2usize.pow(EXP)],
             core::array::from_fn::<_, { 2usize.pow(EXP) }, _>(|i| i as u8)
@@ -417,7 +418,7 @@ async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
             socket.remote_endpoint()
         );
 
-        let mut buffer = [0u8; 2usize.pow(14)];
+        let mut buffer = [0u8; 1500]; // 1500 is an MTU
         log::info!("read loop");
         loop {
             match socket.read(&mut buffer).await {
@@ -466,16 +467,15 @@ async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
 async fn main(spawn: embassy_executor::Spawner) {
     // Provides #[global_allocator] with given number of bytes.
     // Bigger value here means smaller space left for stack.
-    // esp_alloc::heap_allocator!(2usize.pow(11));
+    // `esp-wifi` recommends at least `92k` for `coex` and `72k` for wifi.
+    esp_alloc::heap_allocator!(72_000);
 
     // Setup and configuration.
-    let peripherals = Peripherals::take();
-    let system = SystemControl::new(peripherals.SYSTEM);
-    let clocks = ClockControl::max(system.clock_control).freeze();
-    let timer = TimerGroup::new(peripherals.TIMG0, &clocks);
+    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let timer = TimerGroup::new(peripherals.TIMG0);
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     esp_println::logger::init_logger_from_env();
-    esp_hal_embassy::init(&clocks, timer.timer0);
+    esp_hal_embassy::init(timer.timer0);
     let mut rng = Rng::new(peripherals.RNG);
     let mut prng = {
         if let Some(seed) = consts::RNG_SEED {
@@ -488,12 +488,11 @@ async fn main(spawn: embassy_executor::Spawner) {
     };
 
     // Setup wifi.
-    let init = esp_wifi::initialize(
+    let init = esp_wifi::init(
         esp_wifi::EspWifiInitFor::Wifi,
         timer.timer1,
         rng,
         peripherals.RADIO_CLK,
-        &clocks,
     )
     .unwrap();
     let wifi = peripherals.WIFI;
@@ -529,8 +528,8 @@ async fn main(spawn: embassy_executor::Spawner) {
             TcpSocket<'static>,
             TcpSocket::new(
                 sta_stack,
-                make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)]),
-                make_static!([u8; 2usize.pow(14)], [0; 2usize.pow(14)])
+                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                make_static!([u8; 2usize.pow(13)], [0; 2usize.pow(13)])
             )
         );
         sta_socket.set_timeout(Some(Duration::from_secs(10)));
@@ -546,12 +545,13 @@ async fn main(spawn: embassy_executor::Spawner) {
         .expect("ap up");
 
     // Give up on sta after a while. Probably failed to connect because of password or the target ssid is missing.
-    err!(
-        sta_stack
-            .wait_link_up()
-            .with_timeout(Duration::from_secs(5))
-            .await
-    );
+    if let Err(e) = sta_stack
+        .wait_link_up()
+        .with_timeout(Duration::from_secs(5))
+        .await
+    {
+        log::warn!("STA failed to connect: {e:?}")
+    }
 
     // Start TcpSockets for both stacks.
     let ap_socket = make_static!(
@@ -567,8 +567,8 @@ async fn main(spawn: embassy_executor::Spawner) {
         TcpSocket<'static>,
         TcpSocket::new(
             sta_stack,
-            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)]),
-            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)])
+            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
         )
     );
     sta_socket.set_timeout(Some(Duration::from_secs(10)));

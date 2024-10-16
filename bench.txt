@@ -93,3 +93,27 @@ wait for a few hours
 100x 16384 bytes per 5206ms
 
 So far tests seem to indicate that `max_burst_size = 8` is important.
+
+Change tcp_socket receiving rx_buffer to 2^14 transmitting socket's tx_buffer to 2^14 and get
+100x 16384 bytes per 4536ms
+100x 16384 bytes per 5507ms
+100x 16384 bytes per 4644ms
+100x 16384 bytes per 4345ms
+
+sniffer callback filtering:
+100x 16384 bytes per 4763ms
+with beacon:
+100x 16384 bytes per 4900ms
+100x 16384 bytes per 4719ms
+100x 16384 bytes per 4709ms
+100x 16384 bytes per 4804ms (341049B/s)
+
+logging-packets:
+100x 16384 bytes per 11878ms
+disable logging
+2^13 buffers:
+100x 8192 bytes per 2998ms (273248B/s)
+100x 8192 bytes per 3036ms
+100x 8192 bytes per 3050ms
+100x 8192 bytes per 2880ms (284444B/s)
+100x 8192 bytes per 2908ms

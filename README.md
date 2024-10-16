@@ -9,11 +9,19 @@ Choose the `no_std` option for the `exp32` with `Xtensa` architecture.
 # Flash and run
 After following installation you should have `cargo` and `espflash` installed so `cargo run --release` when the board is plugged in should work. If it hangs on `Connecting...` cancel the command (`Ctrl-c`) and try again or try pressing the `RESET` button of the development board.
 
-## Configuration
-### Environment Variables
+# Configuration
+
+## Features
+- `dump-packets` emits packets to uart debug interface for use in the wifishark extcap. Slows wifi down.
+
+## Environment Variables
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
+
+# Security
+- Currently, the implementation can easily be tricked by another AP with the same ssid sending custom beacons.
+- Currently, the implementation doesn't encrypt data.
 
 # Wifishark
 - Follow [these instructions](https://github.com/Easyoakland/esp-hal/blob/raw-ieee/extras/esp-wifishark/README.md) to build, install, and use the wireshark extcap.
