@@ -97,10 +97,15 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
 }
 
 /// Output packet's data as expected by the wifi-shark extcap at `INFO` level.
-fn log_packet(data: &[u8]) {
-    if cfg!(feature = "dump-packets") {
-        log::info!("@WIFIRAWFRAME {:?}", data)
+fn log_packet(pkt: &PromiscuousPkt) {
+    #[inline]
+    fn log_packet_data(data: &[u8]) {
+        if cfg!(feature = "dump-packets") {
+            log::info!("@WIFIRAWFRAME {:?}", data)
+        }
     }
+    // The last 4 bytes are the frame check sequence, which wireshark doesn't check and we don't care about.
+    log_packet_data(&pkt.data[..pkt.data.len().saturating_sub(4)]);
 }
 
 /// Periodic transmit of beacon with custom vendor data.
@@ -289,9 +294,7 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
     static CNT: AtomicU8 = AtomicU8::new(0);
     let cnt = CNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     if cnt == 0 {
-        // log::info!("ty: {:?}, len: {}", pkt.frame_type, pkt.len);
-        // The last 4 bytes are the frame check sequence, which wireshark doesn't check and we don't care about.
-        log_packet(&pkt.data[..pkt.data.len().saturating_sub(4)]);
+        log_packet(&pkt);
     } else {
         CNT.store(
             (cnt + 1).rem_euclid(110),
