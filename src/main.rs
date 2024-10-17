@@ -476,12 +476,7 @@ async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
                 Ok(_len) => {
                     // let received = str::from_utf8(&buffer[0..len]).unwrap();
                     // log::info!("read {}, {:?}", len, &buffer[0..4]);
-                    if buffer
-                        .chunks_exact(4)
-                        .filter(|x| x == b"\r\r\n\n")
-                        .next()
-                        .is_some()
-                    {
+                    if buffer.chunks_exact(4).any(|x| x == b"\r\r\n\n") {
                         break;
                     }
                 }
