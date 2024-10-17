@@ -1,6 +1,7 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![no_std]
 #![no_main]
+#![expect(dead_code)] // Silence errors while prototyping.
 
 // extern crate alloc;
 
