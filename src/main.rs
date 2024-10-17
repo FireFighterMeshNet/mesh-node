@@ -160,8 +160,10 @@ enum TreePos {
     Ancestor,
     /// Below this node in tree.
     Descendant,
-    /// Same level or below sibling in tree.
+    /// Same level in tree.
     Sibling,
+    /// Descendant of sibling. `esp-mesh` doesn't track these nodes, but we have so few we can.
+    SiblingDescendant,
     /// Not connected to this node.
     #[default]
     Disconnected,
