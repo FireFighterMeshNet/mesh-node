@@ -388,11 +388,9 @@ async fn connection(
     if let Some(other_node) = scan_res.first() {
         conf.as_mixed_conf_mut().0.bssid = Some(other_node.bssid);
         controller.set_configuration(&conf).unwrap();
-        const EXP: u32 = 13;
-        let buf = make_static!(
-            [u8; 2usize.pow(EXP)],
-            core::array::from_fn::<_, { 2usize.pow(EXP) }, _>(|i| i as u8)
-        );
+        const LEN: usize = 2usize.pow(13);
+        let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
+        let mut err = Ok(());
         for _ in 0..10 {
             match controller.connect().await {
                 Ok(()) => {
@@ -408,7 +406,7 @@ async fn connection(
                     }
                     log::info!(
                         "100x {} bytes per {}ms",
-                        2usize.pow(EXP),
+                        LEN,
                         instant1.elapsed().as_millis()
                     );
                     err!(sta_socket.write_all(b"\r\n\r\n").await);
@@ -416,12 +414,14 @@ async fn connection(
                     err!(sta_socket.read(&mut buf).await);
                     let received = str::from_utf8(&buf).todo();
                     log::info!("{received}");
+                    err = Ok(());
 
                     break;
                 }
-                e @ Err(_) => err!(e),
+                e @ Err(_) => err = e,
             }
         }
+        err!(err);
     } else {
         log::warn!("other node not found");
     }
