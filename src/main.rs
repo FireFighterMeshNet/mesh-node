@@ -67,7 +67,7 @@ mod consts {
     /// Maximum number of nodes supported in the network at once.
     pub const MAX_NODES: usize = 5;
 
-    /// Protocol version. Currently unchecked.
+    /// Protocol version.
     pub const PROT_VERSION: u8 = 0;
 }
 
@@ -126,7 +126,7 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
                 body: ieee80211::mgmt_frame::body::BeaconLikeBody {
                     timestamp: 0,
                     beacon_interval: 100,
-                    capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is ap
+                    capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is AP
                     elements: element_chain! {
                         SSIDElement::new(consts::SSID).unwrap(),
                         VendorSpecificElement::new_prefixed(
@@ -154,6 +154,17 @@ async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     }
 }
 
+type Version = u8;
+type Level = u8;
+
+/// Errors related to messages received.
+#[derive(Debug, Clone)]
+enum InvalidMsg {
+    /// Protocol version of msg doesn't match.
+    Version(Version),
+}
+
+/// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone)]
 enum TreePos {
     /// Above this node in tree.
@@ -168,20 +179,22 @@ enum TreePos {
     #[default]
     Disconnected,
 }
+
 /// Value of data for a single node.
 #[derive(Default, Debug, Clone)]
 struct NodeData {
     postion: TreePos,
     /// Version of this protocol the node is running.
-    version: u8,
+    version: Version,
     /// Distance from root. Root is 0. Root's children is 1, etc.
-    level: u8,
+    level: Level,
 }
+
 /// Beacon message per node.
 #[derive(Debug, Clone)]
 struct NodeDataBeaconMsg {
-    version: u8,
-    level: u8,
+    version: Version,
+    level: Level,
 }
 
 impl scroll::ctx::TryIntoCtx for NodeDataBeaconMsg {
@@ -230,7 +243,6 @@ impl From<&NodeData> for NodeDataBeaconMsg {
         }
     }
 }
-
 impl NodeData {
     pub const fn new_disconnected() -> Self {
         NodeData {
@@ -239,6 +251,26 @@ impl NodeData {
             level: u8::MAX,
         }
     }
+    /// Create a new [`NodeData`] from the first msg received from a node.
+    pub fn from_first_msg(msg: NodeDataBeaconMsg) -> Result<Self, InvalidMsg> {
+        if msg.version != consts::PROT_VERSION {
+            return Err(InvalidMsg::Version(msg.version));
+        }
+        Ok(Self {
+            postion: TreePos::Disconnected,
+            version: msg.version,
+            level: msg.level,
+        })
+    }
+    /// Update an existing [`NodeData`] with a more recent [`NodeDataBeaconMsg`]
+    pub fn update_with_msg(&mut self, msg: NodeDataBeaconMsg) -> Result<(), InvalidMsg> {
+        if msg.version != consts::PROT_VERSION {
+            return Err(InvalidMsg::Version(msg.version));
+        }
+        self.version = msg.version;
+        self.level = msg.level;
+        Ok(())
+    }
 }
 
 /// Table of all mesh info.
@@ -246,8 +278,8 @@ impl NodeData {
 struct NodeTable {
     /// Data for this node.
     pub me: NodeData,
-    // `FnvIndexMap` has to be a power of two in size.
     /// The data for other nodes.
+    // `FnvIndexMap` has to be a power of two in size.
     pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
 }
 
@@ -280,10 +312,17 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
                         log::warn!("bad beacon field? {:?}", field);
                         continue;
                     };
-                    let data = data.borrow().into();
                     STATE
                         .borrow()
-                        .lock(|table| table.map.insert(beacon.header.bssid, data))
+                        .lock(|table| match table.map.entry(beacon.header.bssid) {
+                            heapless::Entry::Occupied(mut occupied_entry) => {
+                                occupied_entry.get_mut().update_with_msg(data)
+                            }
+                            heapless::Entry::Vacant(vacant_entry) => {
+                                vacant_entry.insert(NodeData::from_first_msg(data)?).todo();
+                                Ok(())
+                            }
+                        })
                         .todo();
                 }
             }
@@ -315,10 +354,12 @@ async fn connection(
 ) {
     // Setup initial configuration
     // Configuration can also be changed after start if it needs to.
-    // Access point with a password is not supported yet by `esp-wifi` see <https://github.com/esp-rs/esp-wifi-sys/issues/471>.
+    // Access point with a password is not supported yet by `esp-wifi` see <https://github.com/esp-rs/esp-hal/issues/1610>.
+    // Though apparently "WPA2-Enterprise" is? <https://github.com/esp-rs/esp-hal/issues/1608>
+    // So maybe we'll use that?
     let ap_conf = esp_wifi::wifi::AccessPointConfiguration {
         ssid: consts::SSID.try_into().unwrap(),
-        ssid_hidden: true,
+        ssid_hidden: true, // Hidden just means the ssid field is empty (transmitted with length 0) in the default beacons.
         ..Default::default()
     };
     let sta_conf = esp_wifi::wifi::ClientConfiguration {
