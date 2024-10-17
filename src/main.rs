@@ -227,15 +227,6 @@ impl scroll::ctx::MeasureWith<()> for NodeDataBeaconMsg {
         size_of::<Self>()
     }
 }
-impl From<&NodeDataBeaconMsg> for NodeData {
-    fn from(value: &NodeDataBeaconMsg) -> Self {
-        Self {
-            version: value.version,
-            level: value.level,
-            ..Default::default()
-        }
-    }
-}
 impl From<&NodeData> for NodeDataBeaconMsg {
     fn from(value: &NodeData) -> Self {
         Self {
