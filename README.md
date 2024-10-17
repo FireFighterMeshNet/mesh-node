@@ -1,3 +1,7 @@
+# Intro to Embedded Rust
+- See <https://doc.rust-lang.org/book/> for a tutorial on the language itself.
+- See <https://docs.rust-embedded.org/book/intro/index.html> on extra information specific for embedded programming.
+
 # Installation
 See
 - <https://docs.esp-rs.org/book/introduction.html>
