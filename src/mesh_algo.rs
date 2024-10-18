@@ -302,7 +302,11 @@ pub async fn connect_to_next_parent(
         {
             Either::Left(next_parent) => {
                 log::error!("1.1: {next_parent}");
-                // TODO seems to sometimes stall here. Might need to add a timeout.
+                // TODO seems to sometimes stalls here. Might need to add a timeout.
+                // If I restart a different node from the one it is connecting to it resumes with a disconnect error.
+                // This leads me to believe the issue is that the await on
+                // `MultiWifiEventFuture::new(WifiEvent::StaConnected | WifiEvent::StaDisconnected)`
+                // in `connect` isn't receiving an event when it should and so it waits until a different connection causes a StaDisconnected event.
                 let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1).await;
                 log::error!("1.2: {next_parent}");
                 match &res {
