@@ -26,8 +26,8 @@ use esp_println::dbg;
 use esp_wifi::{
     self,
     wifi::{
-        Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiEvent,
-        WifiStaDevice,
+        Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiError,
+        WifiEvent, WifiStaDevice,
     },
 };
 use ieee80211::mac_parser::MACAddress;
@@ -117,6 +117,26 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
     }
 }
 
+/// Try `retries` times to connect.
+async fn connect_to_other_node(
+    config: &mut Configuration,
+    controller: &mut WifiController<'static>,
+    bssid: MACAddress,
+    retries: usize,
+) -> Result<(), WifiError> {
+    config.as_mixed_conf_mut().0.bssid = Some(bssid.0);
+    controller.set_configuration(&config).unwrap();
+
+    let mut res = Ok(());
+    for _ in 0..retries {
+        res = controller.connect().await;
+        if res.is_ok() {
+            break;
+        }
+    }
+    res
+}
+
 /// Handle wifi (both AP and STA).
 #[embassy_executor::task]
 async fn connection(
@@ -158,42 +178,33 @@ async fn connection(
         .0;
     dbg!(&scan_res);
     if let Some(other_node) = scan_res.first() {
-        conf.as_mixed_conf_mut().0.bssid = Some(other_node.bssid);
-        controller.set_configuration(&conf).unwrap();
         const LEN: usize = 2usize.pow(13);
         let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
-        let mut err = Ok(());
-        for _ in 0..10 {
-            match controller.connect().await {
-                Ok(()) => {
-                    log::info!("connected to node");
-                    err!(
-                        sta_socket
-                            .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
-                            .await
-                    );
-                    let instant1 = Instant::now();
-                    for _ in 0..100 {
-                        err!(sta_socket.write_all(&*buf).await);
-                    }
-                    log::info!(
-                        "100x {} bytes per {}ms",
-                        LEN,
-                        instant1.elapsed().as_millis()
-                    );
-                    err!(sta_socket.write_all(b"\r\n\r\n").await);
-                    let mut buf = [0u8; 1024];
-                    err!(sta_socket.read(&mut buf).await);
-                    let received = str::from_utf8(&buf).todo();
-                    log::info!("{received}");
-                    err = Ok(());
-
-                    break;
+        match connect_to_other_node(&mut conf, &mut controller, other_node.bssid.into(), 10).await {
+            Ok(()) => {
+                log::info!("connected to node");
+                err!(
+                    sta_socket
+                        .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
+                        .await
+                );
+                let instant1 = Instant::now();
+                for _ in 0..100 {
+                    err!(sta_socket.write_all(&*buf).await);
                 }
-                e @ Err(_) => err = e,
+                log::info!(
+                    "100x {} bytes per {}ms",
+                    LEN,
+                    instant1.elapsed().as_millis()
+                );
+                err!(sta_socket.write_all(b"\r\n\r\n").await);
+                let mut buf = [0u8; 1024];
+                err!(sta_socket.read(&mut buf).await);
+                let received = str::from_utf8(&buf).todo();
+                log::info!("{received}");
             }
+            e @ Err(_) => err!(e),
         }
-        err!(err);
     } else {
         log::warn!("other node not found");
     }
