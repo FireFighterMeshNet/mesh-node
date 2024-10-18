@@ -137,36 +137,12 @@ async fn connect_to_other_node(
     res
 }
 
-/// Handle wifi (both AP and STA).
-#[embassy_executor::task]
-async fn connection(
-    spawn: embassy_executor::Spawner,
-    mut controller: WifiController<'static>,
-    sta_socket: &'static mut TcpSocket<'static>,
-    ap_mac: MACAddress,
+/// Tests throughput by connecting to a node and sending lots of data.
+async fn bench(
+    controller: &mut WifiController<'static>,
+    config: &mut Configuration,
+    sta_socket: &mut TcpSocket<'static>,
 ) {
-    // Setup initial configuration
-    // Configuration can also be changed after start if it needs to.
-    // Access point with a password is not supported yet by `esp-wifi` see <https://github.com/esp-rs/esp-hal/issues/1610>.
-    // Though apparently "WPA2-Enterprise" is? <https://github.com/esp-rs/esp-hal/issues/1608>
-    // So maybe we'll use that?
-    let ap_conf = esp_wifi::wifi::AccessPointConfiguration {
-        ssid: consts::SSID.try_into().unwrap(),
-        ssid_hidden: true, // Hidden just means the ssid field is empty (transmitted with length 0) in the default beacons.
-        ..Default::default()
-    };
-    let sta_conf = esp_wifi::wifi::ClientConfiguration {
-        ssid: consts::SSID.try_into().unwrap(),
-        auth_method: esp_wifi::wifi::AuthMethod::None,
-        // password: env!("STA_PASSWORD").try_into().unwrap(),
-        ..Default::default()
-    };
-    let mut conf = Configuration::Mixed(sta_conf, ap_conf);
-    controller.set_configuration(&conf).unwrap();
-
-    log::info!("Starting WIFI");
-    controller.start().await.unwrap();
-    log::info!("Started WIFI");
     let scan_res = controller
         .scan_with_config::<2>(esp_wifi::wifi::ScanConfig {
             ssid: Some(consts::SSID),
@@ -180,7 +156,7 @@ async fn connection(
     if let Some(other_node) = scan_res.first() {
         const LEN: usize = 2usize.pow(13);
         let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
-        match connect_to_other_node(&mut conf, &mut controller, other_node.bssid.into(), 10).await {
+        match connect_to_other_node(config, controller, other_node.bssid.into(), 10).await {
             Ok(()) => {
                 log::info!("connected to node");
                 err!(
@@ -208,6 +184,40 @@ async fn connection(
     } else {
         log::warn!("other node not found");
     }
+}
+
+/// Handle wifi (both AP and STA).
+#[embassy_executor::task]
+async fn connection(
+    spawn: embassy_executor::Spawner,
+    mut controller: WifiController<'static>,
+    sta_socket: &'static mut TcpSocket<'static>,
+    ap_mac: MACAddress,
+) {
+    // Setup initial configuration
+    // Configuration can also be changed after start if it needs to.
+    // Access point with a password is not supported yet by `esp-wifi` see <https://github.com/esp-rs/esp-hal/issues/1610>.
+    // Though apparently "WPA2-Enterprise" is? <https://github.com/esp-rs/esp-hal/issues/1608>
+    // So maybe we'll use that?
+    let ap_conf = esp_wifi::wifi::AccessPointConfiguration {
+        ssid: consts::SSID.try_into().unwrap(),
+        ssid_hidden: true, // Hidden just means the ssid field is empty (transmitted with length 0) in the default beacons.
+        ..Default::default()
+    };
+    let sta_conf = esp_wifi::wifi::ClientConfiguration {
+        ssid: consts::SSID.try_into().unwrap(),
+        auth_method: esp_wifi::wifi::AuthMethod::None,
+        // password: env!("STA_PASSWORD").try_into().unwrap(),
+        ..Default::default()
+    };
+    let mut config = Configuration::Mixed(sta_conf, ap_conf);
+    controller.set_configuration(&config).unwrap();
+
+    controller.start().await.unwrap();
+    log::info!("Started WIFI");
+
+    bench(&mut controller, &mut config, sta_socket).await;
+
     let mut sniffer = controller.take_sniffer().expect("first sniffer take");
     sniffer.set_promiscuous_mode(true).unwrap();
     sniffer.set_receive_cb(sniffer_callback);
