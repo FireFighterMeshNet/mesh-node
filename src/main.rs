@@ -27,7 +27,7 @@ use esp_wifi::{
     self,
     wifi::{
         Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiError,
-        WifiEvent, WifiStaDevice,
+        WifiStaDevice,
     },
 };
 use ieee80211::mac_parser::MACAddress;
@@ -98,7 +98,7 @@ fn log_packet(pkt: &PromiscuousPkt) {
     log_packet_data(&pkt.data[..pkt.data.len().saturating_sub(4)]);
 }
 
-/// Setup the callback for any detected packet.
+/// The callback for any detected packet.
 pub fn sniffer_callback(pkt: PromiscuousPkt) {
     let pkt = &pkt;
     mesh_algo::sniffer_callback(pkt);
@@ -143,46 +143,48 @@ async fn bench(
     config: &mut Configuration,
     sta_socket: &mut TcpSocket<'static>,
 ) {
-    let scan_res = controller
-        .scan_with_config::<2>(esp_wifi::wifi::ScanConfig {
-            ssid: Some(consts::SSID),
-            show_hidden: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap()
-        .0;
-    dbg!(&scan_res);
-    if let Some(other_node) = scan_res.first() {
-        const LEN: usize = 2usize.pow(13);
-        let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
-        match connect_to_other_node(config, controller, other_node.bssid.into(), 10).await {
-            Ok(()) => {
-                log::info!("connected to node");
-                err!(
-                    sta_socket
-                        .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
-                        .await
-                );
-                let instant1 = Instant::now();
-                for _ in 0..100 {
-                    err!(sta_socket.write_all(&*buf).await);
+    if cfg!(feature = "bench-wifi") {
+        let scan_res = controller
+            .scan_with_config::<2>(esp_wifi::wifi::ScanConfig {
+                ssid: Some(consts::SSID),
+                show_hidden: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .0;
+        dbg!(&scan_res);
+        if let Some(other_node) = scan_res.first() {
+            const LEN: usize = 2usize.pow(13);
+            let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
+            match connect_to_other_node(config, controller, other_node.bssid.into(), 10).await {
+                Ok(()) => {
+                    log::info!("connected to node");
+                    err!(
+                        sta_socket
+                            .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
+                            .await
+                    );
+                    let instant1 = Instant::now();
+                    for _ in 0..100 {
+                        err!(sta_socket.write_all(&*buf).await);
+                    }
+                    log::info!(
+                        "100x {} bytes per {}ms",
+                        LEN,
+                        instant1.elapsed().as_millis()
+                    );
+                    err!(sta_socket.write_all(b"\r\n\r\n").await);
+                    let mut buf = [0u8; 1024];
+                    err!(sta_socket.read(&mut buf).await);
+                    let received = str::from_utf8(&buf).todo();
+                    log::info!("{received}");
                 }
-                log::info!(
-                    "100x {} bytes per {}ms",
-                    LEN,
-                    instant1.elapsed().as_millis()
-                );
-                err!(sta_socket.write_all(b"\r\n\r\n").await);
-                let mut buf = [0u8; 1024];
-                err!(sta_socket.read(&mut buf).await);
-                let received = str::from_utf8(&buf).todo();
-                log::info!("{received}");
+                e @ Err(_) => err!(e),
             }
-            e @ Err(_) => err!(e),
+        } else {
+            log::warn!("other node not found");
         }
-    } else {
-        log::warn!("other node not found");
     }
 }
 
@@ -212,37 +214,24 @@ async fn connection(
     };
     let mut config = Configuration::Mixed(sta_conf, ap_conf);
     controller.set_configuration(&config).unwrap();
-
     controller.start().await.unwrap();
     log::info!("Started WIFI");
 
     bench(&mut controller, &mut config, sta_socket).await;
 
-    let mut sniffer = controller.take_sniffer().expect("first sniffer take");
+    let mut sniffer = controller.take_sniffer().expect("take sniffer once");
     sniffer.set_promiscuous_mode(true).unwrap();
+    // Spawn handler before setting callback to avoid pile-up from callback before spawning handler.
+    spawn.must_spawn(mesh_algo::connect_to_next_parent(config, controller));
     sniffer.set_receive_cb(sniffer_callback);
-
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
-
-    loop {
-        controller
-            .wait_for_events((WifiEvent::ApStart | WifiEvent::ApStop).into(), false)
-            .await;
-
-        match esp_wifi::wifi::get_ap_state() {
-            esp_wifi::wifi::WifiState::ApStarted => log::info!("AP started"),
-            esp_wifi::wifi::WifiState::ApStopped => log::info!("AP stopped"),
-            esp_wifi::wifi::WifiState::Invalid => panic!("invalid wifi state"),
-            _ => (),
-        }
-    }
 }
 
 /// Answer all tcp requests on port 8000 with some basic html.
 #[embassy_executor::task(pool_size = 2)]
 async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
     loop {
-        log::info!("Waiting for connection...");
+        log::info!("html reply active");
         err!(
             socket
                 .accept(IpListenEndpoint {

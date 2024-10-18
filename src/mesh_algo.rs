@@ -1,10 +1,16 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
 
-use crate::{consts, util::UnwrapTodo, Mutex};
+use crate::{
+    connect_to_other_node, consts,
+    util::{SelectEither, UnwrapTodo},
+    Mutex,
+};
 use core::{borrow::Borrow, marker::PhantomData};
+use either::Either;
+use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use esp_hal::xtensa_lx::mutex::Mutex as _;
-use esp_wifi::wifi::{PromiscuousPkt, Sniffer};
+use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
 use ieee80211::{
     common::CapabilitiesInformation,
@@ -127,6 +133,10 @@ impl From<&NodeData> for NodeDataBeaconMsg {
 /// Table of all mesh info.
 #[derive(Debug, Clone)]
 pub struct NodeTable {
+    /// [`MacAddress`] of parent currently being connected to.
+    /// Should only be [`Some`] while connecting.
+    /// Prevents swapping between multiple nodes that are simultaneously better than current parent.
+    pub pending_parent: Option<MACAddress>,
     /// Data for this node.
     pub me: NodeData,
     /// The data for other nodes.
@@ -134,7 +144,9 @@ pub struct NodeTable {
     pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
 }
 
+/// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
 static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
+    pending_parent: None,
     me: {
         let mut out = NodeData::new_disconnected();
         if let Some(level) = consts::TREE_LEVEL {
@@ -145,7 +157,14 @@ static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
     map: FnvIndexMap::new(),
 });
 
-/// Updates mesh networks tree state. Expected to be called as part of the [`Sniffer`]
+/// [`MacAddress`] for next parent node to connect to.
+/// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
+static NEXT_PARENT: Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, MACAddress> =
+    Signal::new();
+
+/// Set [`Sender`] for new handling new messages.
+/// # Errors
+/// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
 pub fn sniffer_callback(pkt: &PromiscuousPkt) {
     // Return quick helps since this is called and blocks every packet.
     // Ignore non-beacon frames.
@@ -170,10 +189,11 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
             continue;
         };
 
-        // Apply new messages to state.
-        STATE
-            .borrow()
-            .lock(|table| match table.map.entry(beacon.header.bssid) {
+        let candidate_parent = beacon.header.bssid;
+
+        // Apply new message to state.
+        let (me_level, new_node_level, pending_parent) = STATE.borrow().lock(|table| {
+            (|| match table.map.entry(candidate_parent) {
                 heapless::Entry::Occupied(mut occupied_entry) => {
                     occupied_entry.get_mut().update_with_msg(data)
                 }
@@ -181,10 +201,37 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
                     vacant_entry.insert(NodeData::from_first_msg(data)?).todo();
                     Ok(())
                 }
-            })
+            })()
             .todo();
 
-        // Found the message we care about. Stop looking through elements.
+            (
+                table.me.level,
+                table.map[&candidate_parent].level,
+                table.pending_parent,
+            )
+        });
+
+        // Now that the message has updated the table, can send for handling in [`handle_new_msgs`]
+        // Only handle if not root.
+        if consts::TREE_LEVEL != Some(0) {
+            // me_level > 0 since not this is not run by root node.
+            assert_ne!(me_level, 0, "Shouldn't be the root");
+            let parent_level = me_level - 1;
+            // Switch to candidate node if closer to root than current parent.
+            let closer_than_parent = new_node_level < parent_level;
+            // TODO(perf): optimize by picking a new pending parent even if already have a pending parent if better than previous pending parent.
+            // If we do this, have to fix logic in connection handler to avoid overwriting with `None` unconditionally.
+            let already_connecting = pending_parent.is_some();
+
+            if !already_connecting && closer_than_parent {
+                NEXT_PARENT.signal(candidate_parent);
+                STATE
+                    .borrow()
+                    .lock(|table| table.pending_parent = Some(candidate_parent));
+            }
+        }
+
+        // Found the element we care about. Stop looking through elements.
         break;
     }
 }
@@ -233,5 +280,64 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
         }
 
         Timer::after_millis(100).await;
+    }
+}
+
+/// Connects to new parent nodes if a better one is found. Doesn't do anything if this node is root.
+#[embassy_executor::task]
+pub async fn connect_to_next_parent(
+    mut config: Configuration,
+    mut controller: WifiController<'static>,
+) {
+    // Don't run if root.
+    if consts::TREE_LEVEL == Some(0) {
+        return;
+    }
+
+    loop {
+        match NEXT_PARENT
+            .wait()
+            .select(controller.wait_for_events(WifiEvent::StaDisconnected.into(), false))
+            .await
+        {
+            Either::Left(next_parent) => {
+                log::error!("1.1: {next_parent}");
+                // TODO seems to sometimes stall here. Might need to add a timeout.
+                let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1).await;
+                log::error!("1.2: {next_parent}");
+                match &res {
+                    Ok(()) => {
+                        let parent_level = STATE.borrow().lock(|table| {
+                            // Update self level now that connected.
+                            table.me.level = table.map[&next_parent].level + 1;
+                            // Unset pending level now that it is set.
+                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
+                            table.pending_parent = None;
+
+                            table.map[&next_parent].level
+                        });
+                        if res.is_ok() {
+                            log::info!("connected to parent {next_parent} at level {parent_level}")
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("2");
+                        STATE.borrow().lock(|table| {
+                            table.me = NodeData::new_disconnected();
+                            // Even on connection fail clear the pending parent so search can find new parent.
+                            table.pending_parent = None;
+                        });
+                        log::warn!("failed connect to {next_parent}: {e:?}")
+                    }
+                }
+            }
+            Either::Right(_) => {
+                log::error!("3");
+                STATE
+                    .borrow()
+                    .lock(|table| table.me = NodeData::new_disconnected());
+                log::warn!("STA disconnected");
+            }
+        }
     }
 }
