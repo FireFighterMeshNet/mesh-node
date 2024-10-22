@@ -135,25 +135,43 @@ impl From<&NodeData> for NodeDataBeaconMsg {
 pub struct NodeTable {
     /// [`MacAddress`] of parent currently being connected to.
     /// Should only be [`Some`] while connecting.
-    /// Prevents swapping between multiple nodes that are simultaneously better than current parent.
+    /// Prevents trashing when multiple nodes are simultaneously better than current parent.
     pub pending_parent: Option<MACAddress>,
-    /// Data for this node.
-    pub me: NodeData,
+    /// Parent if connected.
+    pub parent: Option<MACAddress>,
     /// The data for other nodes.
     // `FnvIndexMap` has to be a power of two in size.
     pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
+}
+impl NodeTable {
+    /// Saturates at the furthest level from the root if self is disconnected.
+    // This enables the level of `self` to dynamically change as the parent's level changes.
+    pub fn level(&self) -> Level {
+        if let Some(level) = consts::TREE_LEVEL {
+            level
+        } else if let Some(parent) = self.parent {
+            self.map[&parent].level
+        } else {
+            Level::MAX
+        }
+    }
+    /// The message sent in beacons to other nodes.
+    pub fn beacon_msg(&self) -> NodeDataBeaconMsg {
+        NodeDataBeaconMsg {
+            version: consts::PROT_VERSION,
+            level: self.level(),
+        }
+    }
+    /// Mark self as disconnected from the tree. Doesn't actually disconnect.
+    pub fn mark_me_disconnected(&mut self) {
+        self.parent = None;
+    }
 }
 
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
 static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
     pending_parent: None,
-    me: {
-        let mut out = NodeData::new_disconnected();
-        if let Some(level) = consts::TREE_LEVEL {
-            out.level = level;
-        }
-        out
-    },
+    parent: None,
     map: FnvIndexMap::new(),
 });
 
@@ -205,7 +223,7 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
             .todo();
 
             (
-                table.me.level,
+                table.level(),
                 table.map[&candidate_parent].level,
                 table.pending_parent,
             )
@@ -241,7 +259,7 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
 pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     // Buffer for beacon body
     let mut beacon = [0u8; 256];
-    let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.me.borrow().into());
+    let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.beacon_msg());
     let length = beacon
         .pwrite(
             BeaconFrame {
@@ -312,8 +330,6 @@ pub async fn connect_to_next_parent(
                 match &res {
                     Ok(()) => {
                         let parent_level = STATE.borrow().lock(|table| {
-                            // Update self level now that connected.
-                            table.me.level = table.map[&next_parent].level + 1;
                             // Unset pending level now that it is set.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
@@ -327,7 +343,7 @@ pub async fn connect_to_next_parent(
                     Err(e) => {
                         log::error!("2");
                         STATE.borrow().lock(|table| {
-                            table.me = NodeData::new_disconnected();
+                            table.mark_me_disconnected();
                             // Even on connection fail clear the pending parent so search can find new parent.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
@@ -338,9 +354,7 @@ pub async fn connect_to_next_parent(
             }
             Either::Right(_) => {
                 log::error!("3");
-                STATE
-                    .borrow()
-                    .lock(|table| table.me = NodeData::new_disconnected());
+                STATE.borrow().lock(|table| table.mark_me_disconnected());
                 log::warn!("STA disconnected");
             }
         }
