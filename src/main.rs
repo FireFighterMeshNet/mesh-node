@@ -5,16 +5,11 @@
 
 // extern crate alloc;
 
-use core::{
-    net::{Ipv4Addr, SocketAddrV4},
-    str,
-    sync::atomic::AtomicU8,
-    u8,
-};
+use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{
     tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
 };
-use embassy_time::{Duration, Instant, WithTimeout};
+use embassy_time::{Duration, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
@@ -22,7 +17,6 @@ use esp_hal::{
     rng::Rng,
     timer::timg::TimerGroup,
 };
-use esp_println::dbg;
 use esp_wifi::{
     self,
     wifi::{
@@ -32,7 +26,6 @@ use esp_wifi::{
 };
 use ieee80211::mac_parser::MACAddress;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
-use util::UnwrapTodo;
 
 type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
 
@@ -137,63 +130,11 @@ async fn connect_to_other_node(
     res
 }
 
-/// Tests throughput by connecting to a node and sending lots of data.
-async fn bench(
-    controller: &mut WifiController<'static>,
-    config: &mut Configuration,
-    sta_socket: &mut TcpSocket<'static>,
-) {
-    if cfg!(feature = "bench-wifi") {
-        let scan_res = controller
-            .scan_with_config::<2>(esp_wifi::wifi::ScanConfig {
-                ssid: Some(consts::SSID),
-                show_hidden: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .0;
-        dbg!(&scan_res);
-        if let Some(other_node) = scan_res.first() {
-            const LEN: usize = 2usize.pow(13);
-            let buf = make_static!([u8; LEN], core::array::from_fn(|i| i as u8));
-            match connect_to_other_node(config, controller, other_node.bssid.into(), 10).await {
-                Ok(()) => {
-                    log::info!("connected to node");
-                    err!(
-                        sta_socket
-                            .connect(SocketAddrV4::new(Ipv4Addr::new(192, 168, 2, 1), 8000))
-                            .await
-                    );
-                    let instant1 = Instant::now();
-                    for _ in 0..100 {
-                        err!(sta_socket.write_all(&*buf).await);
-                    }
-                    log::info!(
-                        "100x {} bytes per {}ms",
-                        LEN,
-                        instant1.elapsed().as_millis()
-                    );
-                    err!(sta_socket.write_all(b"\r\n\r\n").await);
-                    let mut buf = [0u8; 1024];
-                    err!(sta_socket.read(&mut buf).await);
-                    let received = str::from_utf8(&buf).todo();
-                    log::info!("{received}");
-                }
-                e @ Err(_) => err!(e),
-            }
-        } else {
-            log::warn!("other node not found");
-        }
-    }
-}
-
 /// Handle wifi (both AP and STA).
 #[embassy_executor::task]
 async fn connection(
     spawn: embassy_executor::Spawner,
     mut controller: WifiController<'static>,
-    sta_socket: &'static mut TcpSocket<'static>,
     ap_mac: MACAddress,
 ) {
     // Setup initial configuration
@@ -212,12 +153,10 @@ async fn connection(
         // password: env!("STA_PASSWORD").try_into().unwrap(),
         ..Default::default()
     };
-    let mut config = Configuration::Mixed(sta_conf, ap_conf);
+    let config = Configuration::Mixed(sta_conf, ap_conf);
     controller.set_configuration(&config).unwrap();
     controller.start().await.unwrap();
     log::info!("Started WIFI");
-
-    bench(&mut controller, &mut config, sta_socket).await;
 
     let mut sniffer = controller.take_sniffer().expect("take sniffer once");
     sniffer.set_promiscuous_mode(true).unwrap();
@@ -347,18 +286,7 @@ async fn main(spawn: embassy_executor::Spawner) {
 
     spawn.must_spawn(ap_task(ap_runner));
     spawn.must_spawn(sta_task(sta_runner));
-    {
-        let sta_socket = make_static!(
-            TcpSocket<'static>,
-            TcpSocket::new(
-                sta_stack,
-                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                make_static!([u8; 2usize.pow(13)], [0; 2usize.pow(13)])
-            )
-        );
-        sta_socket.set_timeout(Some(Duration::from_secs(10)));
-        spawn.must_spawn(connection(spawn, controller, sta_socket, ap_mac.into()));
-    }
+    spawn.must_spawn(connection(spawn, controller, ap_mac.into()));
     spawn.must_spawn(boot_button_reply(io.pins.gpio0));
 
     // Wait for AP stack to finish startup.
@@ -367,15 +295,6 @@ async fn main(spawn: embassy_executor::Spawner) {
         .with_timeout(Duration::from_secs(5))
         .await
         .expect("ap up");
-
-    // Give up on sta after a while. Probably failed to connect because of password or the target ssid is missing.
-    if let Err(e) = sta_stack
-        .wait_link_up()
-        .with_timeout(Duration::from_secs(5))
-        .await
-    {
-        log::warn!("STA failed to connect: {e:?}")
-    }
 
     // Start TcpSockets for both stacks.
     let ap_socket = make_static!(

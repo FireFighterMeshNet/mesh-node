@@ -74,4 +74,3 @@ const-gen = "1.6.5"
 [features]
 # Dump raw ieee80211 packets with sniffer. Decreases wifi performance.
 dump-packets = []
-bench-wifi = []
