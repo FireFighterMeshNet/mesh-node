@@ -150,7 +150,7 @@ impl NodeTable {
         if let Some(level) = consts::TREE_LEVEL {
             level
         } else if let Some(parent) = self.parent {
-            self.map[&parent].level
+            self.map[&parent].level + 1
         } else {
             Level::MAX
         }
