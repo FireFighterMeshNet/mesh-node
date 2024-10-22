@@ -180,8 +180,6 @@ static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
 static NEXT_PARENT: Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, MACAddress> =
     Signal::new();
 
-/// Set [`Sender`] for new handling new messages.
-/// # Errors
 /// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
 pub fn sniffer_callback(pkt: &PromiscuousPkt) {
     // Return quick helps since this is called and blocks every packet.
