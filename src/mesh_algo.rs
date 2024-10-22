@@ -329,6 +329,7 @@ pub async fn connect_to_next_parent(
                         STATE.borrow().lock(|table| {
                             table.me = NodeData::new_disconnected();
                             // Even on connection fail clear the pending parent so search can find new parent.
+                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
                         });
                         log::warn!("failed connect to {next_parent}: {e:?}")

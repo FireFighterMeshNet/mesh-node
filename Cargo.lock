@@ -808,8 +808,9 @@ dependencies = [
 
 [[package]]
 name = "futures-buffered"
-version = "0.2.8"
-source = "git+https://github.com/Easyoakland/futures-buffered?branch=no_std#e93bffa5310ef81650ff69888f7bcc1a845ddc08"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34acda8ae8b63fbe0b2195c998b180cff89a8212fb2622a78b572a9f1c6f7684"
 dependencies = [
  "cordyceps",
  "diatomic-waker",

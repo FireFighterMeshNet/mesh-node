@@ -51,10 +51,8 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy" }
 embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
 # change back to regular release after <https://github.com/Frostie314159/ieee80211-rs/pull/16> is included
 ieee80211 = { git = "https://github.com/Frostie314159/ieee80211-rs" }
-# Remove after futures-buffered is updated *and* https://github.com/yoshuawuyts/futures-concurrency/pull/196
+# Remove after https://github.com/yoshuawuyts/futures-concurrency/pull/196
 futures-concurrency = { git = "https://github.com/Easyoakland/futures-concurrency", branch = "fix-nostd" }
-# Remove after https://github.com/conradludgate/futures-buffered/pull/9
-futures-buffered = { git = "https://github.com/Easyoakland/futures-buffered", branch = "no_std" }
 
 [profile.dev]
 opt-level = "s"
