@@ -242,10 +242,10 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
             let already_connecting = pending_parent.is_some();
 
             if !already_connecting && closer_than_parent {
-                NEXT_PARENT.signal(candidate_parent);
                 STATE
                     .borrow()
                     .lock(|table| table.pending_parent = Some(candidate_parent));
+                NEXT_PARENT.signal(candidate_parent);
             }
         }
 
@@ -319,17 +319,20 @@ pub async fn connect_to_next_parent(
             .await
         {
             Either::Left(next_parent) => {
-                log::error!("1.1: {next_parent}");
+                log::info!("connecting: {next_parent}");
                 // TODO seems to sometimes stalls here. Might need to add a timeout.
                 // If I restart a different node from the one it is connecting to it resumes with a disconnect error.
                 // This leads me to believe the issue is that the await on
                 // `MultiWifiEventFuture::new(WifiEvent::StaConnected | WifiEvent::StaDisconnected)`
                 // in `connect` isn't receiving an event when it should and so it waits until a different connection causes a StaDisconnected event.
+                //  Appears stalling occurs if connecting to same node already connected.
                 let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1).await;
-                log::error!("1.2: {next_parent}");
                 match &res {
                     Ok(()) => {
                         let parent_level = STATE.borrow().lock(|table| {
+                            // Set new parent now that connected.
+                            table.parent = Some(next_parent);
+
                             // Unset pending level now that it is set.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
@@ -337,23 +340,21 @@ pub async fn connect_to_next_parent(
                             table.map[&next_parent].level
                         });
                         if res.is_ok() {
-                            log::info!("connected to parent {next_parent} at level {parent_level}")
+                            log::info!("connected: mac={next_parent}; level={parent_level}")
                         }
                     }
                     Err(e) => {
-                        log::error!("2");
                         STATE.borrow().lock(|table| {
                             table.mark_me_disconnected();
                             // Even on connection fail clear the pending parent so search can find new parent.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
                         });
-                        log::warn!("failed connect to {next_parent}: {e:?}")
+                        log::warn!("failed connect: mac={next_parent}: {e:?}")
                     }
                 }
             }
             Either::Right(_) => {
-                log::error!("3");
                 STATE.borrow().lock(|table| table.mark_me_disconnected());
                 log::warn!("STA disconnected");
             }
