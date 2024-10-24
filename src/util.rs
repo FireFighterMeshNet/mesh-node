@@ -91,9 +91,7 @@ impl<T, E> UnwrapExt for Result<T, E> {
 
 /// Extension trait to race heterogeneous futures.
 pub trait SelectEither {
-    /// Select Either the result of the first future (Left) or the result of the second future (Right) by [`race`][race]ing.
-    ///
-    /// [race]: futures_concurrency::future::futures_ext::race
+    /// Select Either the result of the first future (Left) or the result of the second future (Right), whichever is ready first.
     #[allow(async_fn_in_trait)]
     async fn select<T1, T2>(self, fut2: impl IntoFuture<Output = T2>) -> Either<T1, T2>
     where
