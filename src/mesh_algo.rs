@@ -2,13 +2,13 @@
 
 use crate::{
     connect_to_other_node, consts,
-    util::{SelectEither, UnwrapTodo},
+    util::{SelectEither, UnwrapExt},
     Mutex,
 };
 use core::{borrow::Borrow, marker::PhantomData};
 use either::Either;
 use embassy_sync::signal::Signal;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, WithTimeout};
 use esp_hal::xtensa_lx::mutex::Mutex as _;
 use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
@@ -208,24 +208,26 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
         let candidate_parent = beacon.header.bssid;
 
         // Apply new message to state.
-        let (me_level, new_node_level, pending_parent) = STATE.borrow().lock(|table| {
-            (|| match table.map.entry(candidate_parent) {
-                heapless::Entry::Occupied(mut occupied_entry) => {
-                    occupied_entry.get_mut().update_with_msg(data)
-                }
-                heapless::Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(NodeData::from_first_msg(data)?).todo();
-                    Ok(())
-                }
-            })()
-            .todo();
+        let (me_level, new_node_level, current_parent, pending_parent) =
+            STATE.borrow().lock(|table| {
+                (|| match table.map.entry(candidate_parent) {
+                    heapless::Entry::Occupied(mut occupied_entry) => {
+                        occupied_entry.get_mut().update_with_msg(data)
+                    }
+                    heapless::Entry::Vacant(vacant_entry) => {
+                        vacant_entry.insert(NodeData::from_first_msg(data)?).todo();
+                        Ok(())
+                    }
+                })()
+                .todo();
 
-            (
-                table.level(),
-                table.map[&candidate_parent].level,
-                table.pending_parent,
-            )
-        });
+                (
+                    table.level(),
+                    table.map[&candidate_parent].level,
+                    table.parent,
+                    table.pending_parent,
+                )
+            });
 
         // Now that the message has updated the table, can send for handling in [`handle_new_msgs`]
         // Only handle if not root.
@@ -238,8 +240,10 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
             // TODO(perf): optimize by picking a new pending parent even if already have a pending parent if better than previous pending parent.
             // If we do this, have to fix logic in connection handler to avoid overwriting with `None` unconditionally.
             let already_connecting = pending_parent.is_some();
+            // Don't connect to the current parent again.
+            let is_current_parent = Some(candidate_parent) == current_parent;
 
-            if !already_connecting && closer_than_parent {
+            if !already_connecting && closer_than_parent && !is_current_parent {
                 STATE
                     .borrow()
                     .lock(|table| table.pending_parent = Some(candidate_parent));
@@ -322,11 +326,14 @@ pub async fn connect_to_next_parent(
                 // If I restart a different node from the one it is connecting to it resumes with a disconnect error.
                 // This leads me to believe the issue is that the await on
                 // `MultiWifiEventFuture::new(WifiEvent::StaConnected | WifiEvent::StaDisconnected)`
-                // in `connect` isn't receiving an event when it should and so it waits until a different connection causes a StaDisconnected event.
+                // in `connect` isn't receiving an event when it should and so it waits until a different connection causes an event.
                 //  Appears stalling occurs if connecting to same node already connected.
-                let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1).await;
+                // Stalling seems to have somewhat resolved with inclusion of disconnect before connect.
+                let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1)
+                    .with_timeout(Duration::from_secs(60))
+                    .await;
                 match &res {
-                    Ok(()) => {
+                    Ok(Ok(())) => {
                         let parent_level = STATE.borrow().lock(|table| {
                             // Set new parent now that connected.
                             table.parent = Some(next_parent);
@@ -340,6 +347,15 @@ pub async fn connect_to_next_parent(
                         if res.is_ok() {
                             log::info!("connected: mac={next_parent}; level={parent_level}")
                         }
+                    }
+                    Ok(Err(e)) => {
+                        STATE.borrow().lock(|table| {
+                            table.mark_me_disconnected();
+                            // Even on connection fail clear the pending parent so search can find new parent.
+                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
+                            table.pending_parent = None;
+                        });
+                        log::warn!("failed connect: mac={next_parent}: {e:?}")
                     }
                     Err(e) => {
                         STATE.borrow().lock(|table| {

@@ -35,7 +35,7 @@ esp-wifi = { version = "0.10.1", features = ["esp32",
     "log",
     # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
 ] }
-futures-concurrency = { version = "7.6.1", default-features = false }
+futures-lite = { version = "2.3.0", default-features = false, features = ["race"] }
 heapless = "0.8.0"
 ieee80211 = "0.5.0"
 log = { version = "0.4.21" }
@@ -51,8 +51,10 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy" }
 embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
 # change back to regular release after <https://github.com/Frostie314159/ieee80211-rs/pull/16> is included
 ieee80211 = { git = "https://github.com/Frostie314159/ieee80211-rs" }
-# Remove after https://github.com/yoshuawuyts/futures-concurrency/pull/196
-futures-concurrency = { git = "https://github.com/Easyoakland/futures-concurrency", branch = "fix-nostd" }
+# change back to regular release after <https://github.com/esp-rs/esp-hal/pull/2392> is included
+esp-wifi = { git = "https://github.com/esp-rs/esp-hal" }
+esp-hal = { git = "https://github.com/esp-rs/esp-hal" }
+esp-alloc = { git = "https://github.com/esp-rs/esp-hal" }
 
 [profile.dev]
 opt-level = "s"

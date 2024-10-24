@@ -1,6 +1,6 @@
 use core::future::{Future, IntoFuture};
 use either::Either;
-use futures_concurrency::future::FutureExt;
+use futures_lite::FutureExt;
 
 // See <https://github.com/embassy-rs/static-cell/issues/16>
 /// Convert a `T` to a `&'static mut T`.
@@ -47,13 +47,17 @@ macro_rules! err {
     };
 }
 
-/// Prototyping unwraps that should be handled when the design is done.
-pub trait UnwrapTodo {
+/// Extra `unwrap`-like methods
+pub trait UnwrapExt {
     type T;
+    /// `unwrap` indicating this is prototype code. Should be removed from final product.
     fn todo(self) -> Self::T;
+    /// `unwrap` indicating this is prototype code. Allows a message. Should be removed from final product.
     fn todo_msg(self, msg: &str) -> Self::T;
+    /// Indicates an assertion that should be true but isn't worth crashing over.
+    fn unwrap_or_log(self, msg: impl core::fmt::Display);
 }
-impl<T> UnwrapTodo for Option<T> {
+impl<T> UnwrapExt for Option<T> {
     type T = T;
 
     fn todo(self) -> Self::T {
@@ -62,8 +66,14 @@ impl<T> UnwrapTodo for Option<T> {
     fn todo_msg(self, msg: &str) -> Self::T {
         self.unwrap_or_else(|| todo!("{msg}"))
     }
+    /// Unwrap type or log as error.
+    fn unwrap_or_log(self, msg: impl core::fmt::Display) {
+        if self.is_none() {
+            log::error!("{msg}")
+        }
+    }
 }
-impl<T, E> UnwrapTodo for Result<T, E> {
+impl<T, E> UnwrapExt for Result<T, E> {
     type T = T;
 
     fn todo(self) -> Self::T {
@@ -71,6 +81,11 @@ impl<T, E> UnwrapTodo for Result<T, E> {
     }
     fn todo_msg(self, msg: &str) -> Self::T {
         self.unwrap_or_else(|_| todo!("{msg}"))
+    }
+    fn unwrap_or_log(self, msg: impl core::fmt::Display) {
+        if self.is_err() {
+            log::error!("{msg}")
+        }
     }
 }
 
@@ -85,7 +100,7 @@ pub trait SelectEither {
         Self: Future<Output = T1> + Sized,
     {
         async { Either::Left(self.await) }
-            .race(async { Either::Right(fut2.await) })
+            .or(async { Either::Right(fut2.await) })
             .await
     }
 }

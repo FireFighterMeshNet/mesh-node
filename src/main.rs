@@ -26,6 +26,7 @@ use esp_wifi::{
 };
 use ieee80211::mac_parser::MACAddress;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
+use util::UnwrapExt;
 
 type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
 
@@ -117,8 +118,22 @@ async fn connect_to_other_node(
     bssid: MACAddress,
     retries: usize,
 ) -> Result<(), WifiError> {
+    if config.as_mixed_conf_mut().0.bssid == Some(bssid.0)
+        && matches!(controller.is_connected(), Ok(true))
+    {
+        log::warn!(
+            "try connect to {} but already connected",
+            MACAddress(config.as_mixed_conf_mut().0.bssid.unwrap())
+        );
+        return Ok(());
+    }
+
     config.as_mixed_conf_mut().0.bssid = Some(bssid.0);
     controller.set_configuration(&config).unwrap();
+
+    futures_lite::future::poll_once(controller.disconnect())
+        .await
+        .unwrap_or_log("disconnect unfinished");
 
     let mut res = Ok(());
     for _ in 0..retries {
