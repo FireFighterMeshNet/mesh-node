@@ -200,6 +200,10 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
     if beacon.ssid() != Some(consts::SSID) {
         return;
     }
+    // Ignore from denylist.
+    if consts::DENYLIST_MACS.contains(&beacon.header.bssid.0) {
+        return;
+    }
 
     for field in beacon
         .elements

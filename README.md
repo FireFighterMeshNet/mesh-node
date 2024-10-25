@@ -25,6 +25,7 @@ After following installation you should have `cargo` and `espflash` installed so
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
+- `DENYLIST_MACS`: (optional) comma seperated list of hex code mac address like `12:34:56:78:9:01,12:34:56:78:9:02` to ignore and not connect to.
 
 # Security
 - Currently, the implementation can easily be tricked by another AP with the same ssid sending custom beacons.
