@@ -5,10 +5,15 @@ use crate::{
     util::{SelectEither, UnwrapExt},
     Mutex,
 };
-use core::{borrow::Borrow, marker::PhantomData};
+use core::{borrow::Borrow, future::Future, marker::PhantomData};
 use either::Either;
-use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer, WithTimeout};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::{Channel, Receiver, Sender},
+    pubsub::{DynPublisher, DynSubscriber},
+    signal::Signal,
+};
+use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
 use esp_hal::xtensa_lx::mutex::Mutex as _;
 use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
@@ -20,9 +25,14 @@ use ieee80211::{
     mgmt_frame::BeaconFrame,
 };
 use scroll::{Pread, Pwrite};
+use stack_dst::Value;
 
 pub type Version = u8;
 pub type Level = u8;
+
+pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
+pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
+pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
 
 /// Errors related to messages received.
 #[derive(Debug, Clone)]
@@ -177,8 +187,7 @@ static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
 
 /// [`MacAddress`] for next parent node to connect to.
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
-static NEXT_PARENT: Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, MACAddress> =
-    Signal::new();
+static NEXT_PARENT: Signal<CriticalSectionRawMutex, MACAddress> = Signal::new();
 
 /// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
 pub fn sniffer_callback(pkt: &PromiscuousPkt) {
@@ -303,37 +312,147 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     }
 }
 
+// Max size in units of `u64` for the values of [`ControllerMsg`]
+// 1 usize goes to the metadata and the rest is for the actual size.
+const DYN_FIXED_SIZE: usize = 37;
+/// Commands/Messages (like in the actor model) for the controller
+pub struct ControllerCommand(
+    // Can't make this `FnOnce` without nightly since it would have to move out the dyn FnOnce to call.
+    // `std::Box` is special and gets to do this but 3rd party types like `Value` here don't.
+    // Read as "A closure with a maximum size which returns a future a maximum size"
+    pub  Value<
+        dyn for<'a> FnMut(
+            &'a mut esp_wifi::wifi::Configuration,
+            &'a mut WifiController<'static>,
+        ) -> Value<
+            dyn Future<Output = ()> + 'a,
+            stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>,
+        >,
+        stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>,
+    >,
+);
+/// Create a new command for the controller to execute.
+/// Works by taking a fixed size closure that returns a fixed size future and polling the result to completion.
+/// # Panics
+/// If this panics the future or closure is too large. Either increase [`DYN_FIXED_SIZE`] or make the future/closure smaller.
+/// # Example
+/// Use like
+/// ```ignore
+/// controller_msg!(config, controller, { log::info!("{:?}{:?}", controller.get_capabilities(), config.as_ap_conf_ref()) })
+/// ```
+macro_rules! controller_command {
+    ($config:ident, $controller:ident, $e:expr) => {
+        ControllerCommand(
+            Value::new(
+                for<'a> move |$config: &'a mut Configuration,
+                              $controller: &'a mut WifiController<'static>|
+                              -> Value<dyn Future<Output = ()> + 'a, stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>> {
+                        Value::new(async move { $e })
+                    .unwrap_or_else(|e| panic!("future: {} >= {}", size_of_val(&e), size_of::<u64>() * DYN_FIXED_SIZE))
+                },
+            )
+            .unwrap_or_else(|e| panic!("closure: {} >= {}", size_of_val(&e), size_of::<u64>() * DYN_FIXED_SIZE))
+        )
+    };
+}
+/// `controller` has to be managed exclusively by this task so events and actions be simultaneously awaited. See "actor model".
+/// Can send commands for what to do next from many other tasks using the channel for `rx`.
+#[embassy_executor::task]
+pub async fn controller_task(
+    mut config: Configuration,
+    mut controller: WifiController<'static>,
+    rx: Receiver<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
+    sta_disconnected_rx: DynPublisher<'static, (Instant, MACAddress)>,
+) {
+    loop {
+        // Wait for an event from the controller or a message to do something with the controller.
+        let res = rx
+            .receive()
+            .select(controller.wait_for_events(
+                WifiEvent::StaDisconnected | WifiEvent::ApStaconnected,
+                false,
+            ))
+            .await;
+
+        match res {
+            Either::Left(mut msg) => msg.0(&mut config, &mut controller).await,
+            Either::Right(event) => {
+                if event.contains(WifiEvent::StaDisconnected) {
+                    sta_disconnected_rx.publish_immediate((
+                        Instant::now(),
+                        MACAddress(
+                            controller
+                                .get_configuration()
+                                .unwrap()
+                                .as_client_conf_ref()
+                                .unwrap()
+                                .bssid
+                                .expect("connected to a bssid"),
+                        ),
+                    ));
+                }
+                // TODO other events.
+            }
+        }
+    }
+}
+
 /// Connects to new parent nodes if a better one is found. Doesn't do anything if this node is root.
 #[embassy_executor::task]
 pub async fn connect_to_next_parent(
-    mut config: Configuration,
-    mut controller: WifiController<'static>,
+    // Send new commands to controller task
+    controller_tx: Sender<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
+    // Publisher for new sta_disconnected events.
+    mut sta_disconnected_rx: DynSubscriber<'static, (Instant, MACAddress)>,
 ) {
     // Don't run if root.
     if consts::TREE_LEVEL == Some(0) {
         return;
     }
 
+    // Last time connected to parent.
+    let mut last_connected = Instant::now();
     loop {
         match NEXT_PARENT
             .wait()
-            .select(controller.wait_for_events(WifiEvent::StaDisconnected.into(), false))
+            .select(async {
+                // Handle disconnects in this function so we only mark ourselves as disconnected when not connected or trying to connect.
+                loop {
+                    let disconnect_event = sta_disconnected_rx.next_message_pure().await;
+                    // Only care about the event if disconnected since last connect.
+                    if disconnect_event
+                        .0
+                        .checked_duration_since(last_connected)
+                        .is_some()
+                    {
+                        break;
+                    };
+                }
+            })
             .await
         {
             Either::Left(next_parent) => {
-                log::info!("connecting: {next_parent}");
-                // TODO seems to sometimes stalls here. Might need to add a timeout.
-                // If I restart a different node from the one it is connecting to it resumes with a disconnect error.
-                // This leads me to believe the issue is that the await on
-                // `MultiWifiEventFuture::new(WifiEvent::StaConnected | WifiEvent::StaDisconnected)`
-                // in `connect` isn't receiving an event when it should and so it waits until a different connection causes an event.
-                //  Appears stalling occurs if connecting to same node already connected.
-                // Stalling seems to have somewhat resolved with inclusion of disconnect before connect.
-                let res = connect_to_other_node(&mut config, &mut controller, next_parent, 1)
-                    .with_timeout(Duration::from_secs(60))
-                    .await;
-                match &res {
-                    Ok(Ok(())) => {
+                log::info!("connecting: mac={next_parent}");
+                /// Send/receive results from commands sent to controller task.
+                static ONESHOT: OneShotChannel<
+                    Result<Result<Instant, esp_wifi::wifi::WifiError>, TimeoutError>,
+                > = OneShotChannel::new();
+                let command = controller_command!(config, controller, {
+                    // Either fail to connect or return when connection succeeded
+                    let connection_result =
+                        connect_to_other_node(config, controller, next_parent, 1)
+                            .with_timeout(Duration::from_secs(60))
+                            .await
+                            .map(|x| x.map(|_| Instant::now()));
+                    ONESHOT.send(connection_result).await;
+                });
+                controller_tx.send(command).await;
+                let res = ONESHOT.receive().await;
+
+                match res {
+                    Ok(Ok(instant)) => {
+                        last_connected = instant;
+
                         let parent_level = STATE.borrow().lock(|table| {
                             // Set new parent now that connected.
                             table.parent = Some(next_parent);

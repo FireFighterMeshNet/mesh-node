@@ -1,4 +1,5 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
+#![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
 #![no_std]
 #![no_main]
 #![expect(dead_code)] // Silence errors while prototyping.
@@ -9,7 +10,8 @@ use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{
     tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
 };
-use embassy_time::{Duration, WithTimeout};
+use embassy_sync::{channel::Channel, pubsub::PubSubChannel};
+use embassy_time::{Duration, Instant, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
@@ -25,6 +27,7 @@ use esp_wifi::{
     },
 };
 use ieee80211::mac_parser::MACAddress;
+use mesh_algo::controller_task;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
 use util::UnwrapExt;
 
@@ -175,8 +178,36 @@ async fn connection(
 
     let mut sniffer = controller.take_sniffer().expect("take sniffer once");
     sniffer.set_promiscuous_mode(true).unwrap();
+    let controller_commands = make_static!(
+        Channel::<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            mesh_algo::ControllerCommand,
+            10,
+        >,
+        Channel::new()
+    );
+    let sta_disconnect = make_static!(
+        PubSubChannel::<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (Instant, MACAddress),
+            4,
+            1,
+            1,
+        >,
+        PubSubChannel::new()
+    );
+    // Spawn task that handles all `controller` actions.
+    spawn.must_spawn(controller_task(
+        config,
+        controller,
+        controller_commands.receiver(),
+        sta_disconnect.dyn_publisher().unwrap(),
+    ));
     // Spawn handler before setting callback to avoid pile-up from callback before spawning handler.
-    spawn.must_spawn(mesh_algo::connect_to_next_parent(config, controller));
+    spawn.must_spawn(mesh_algo::connect_to_next_parent(
+        controller_commands.sender(),
+        sta_disconnect.dyn_subscriber().unwrap(),
+    ));
     sniffer.set_receive_cb(sniffer_callback);
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
 }
@@ -264,6 +295,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             SmallRng::from_seed(buf)
         }
     };
+    log::info!("TREE_LEVEL: {:?}", consts::TREE_LEVEL);
 
     // Setup wifi.
     let init = esp_wifi::init(

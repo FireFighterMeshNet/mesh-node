@@ -789,6 +789,7 @@ dependencies = [
  "log",
  "rand",
  "scroll",
+ "stack_dst",
  "static_cell",
 ]
 
@@ -1460,6 +1461,15 @@ name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
+
+[[package]]
+name = "stack_dst"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d4c67c20215d424cf30fb7a357bbff2853deef160abfb0ff237072e51c843d3"
+dependencies = [
+ "generic-array",
+]
 
 [[package]]
 name = "static_cell"
