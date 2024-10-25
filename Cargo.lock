@@ -522,7 +522,7 @@ checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
 [[package]]
 name = "esp-alloc"
 version = "0.5.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "critical-section",
  "enumset",
@@ -554,7 +554,7 @@ dependencies = [
 [[package]]
 name = "esp-build"
 version = "0.1.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "quote",
  "syn 2.0.79",
@@ -564,7 +564,7 @@ dependencies = [
 [[package]]
 name = "esp-config"
 version = "0.1.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "document-features",
 ]
@@ -572,7 +572,7 @@ dependencies = [
 [[package]]
 name = "esp-hal"
 version = "0.21.1"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "basic-toml",
  "bitfield",
@@ -593,10 +593,10 @@ dependencies = [
  "embedded-io",
  "embedded-io-async",
  "enumset",
- "esp-build 0.1.0 (git+https://github.com/esp-rs/esp-hal)",
+ "esp-build 0.1.0 (git+https://github.com/Easyoakland/esp-hal/?branch=sta-list)",
  "esp-config",
- "esp-hal-procmacros 0.14.0 (git+https://github.com/esp-rs/esp-hal)",
- "esp-metadata 0.4.0 (git+https://github.com/esp-rs/esp-hal)",
+ "esp-hal-procmacros 0.14.0 (git+https://github.com/Easyoakland/esp-hal/?branch=sta-list)",
+ "esp-metadata 0.4.0 (git+https://github.com/Easyoakland/esp-hal/?branch=sta-list)",
  "esp-riscv-rt",
  "esp32",
  "fugit",
@@ -651,7 +651,7 @@ dependencies = [
 [[package]]
 name = "esp-hal-procmacros"
 version = "0.14.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "darling",
  "document-features",
@@ -678,7 +678,7 @@ dependencies = [
 [[package]]
 name = "esp-metadata"
 version = "0.4.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "anyhow",
  "basic-toml",
@@ -701,7 +701,7 @@ dependencies = [
 [[package]]
 name = "esp-riscv-rt"
 version = "0.9.0"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "document-features",
  "riscv",
@@ -711,7 +711,7 @@ dependencies = [
 [[package]]
 name = "esp-wifi"
 version = "0.10.1"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "bt-hci",
  "cfg-if",
@@ -723,10 +723,10 @@ dependencies = [
  "embedded-io-async",
  "enumset",
  "esp-alloc",
- "esp-build 0.1.0 (git+https://github.com/esp-rs/esp-hal)",
+ "esp-build 0.1.0 (git+https://github.com/Easyoakland/esp-hal/?branch=sta-list)",
  "esp-config",
  "esp-hal",
- "esp-metadata 0.4.0 (git+https://github.com/esp-rs/esp-hal)",
+ "esp-metadata 0.4.0 (git+https://github.com/Easyoakland/esp-hal/?branch=sta-list)",
  "esp-wifi-sys",
  "fugit",
  "heapless 0.8.0",
@@ -1751,7 +1751,7 @@ dependencies = [
 [[package]]
 name = "xtensa-lx-rt"
 version = "0.17.1"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "anyhow",
  "bare-metal",
@@ -1769,7 +1769,7 @@ dependencies = [
 [[package]]
 name = "xtensa-lx-rt-proc-macros"
 version = "0.2.2"
-source = "git+https://github.com/esp-rs/esp-hal#1de248360971c5f060c51a4ecc644ccc0d7761ce"
+source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "darling",
  "proc-macro2",

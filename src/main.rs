@@ -196,12 +196,23 @@ async fn connection(
         >,
         PubSubChannel::new()
     );
+    let ap_sta_connect = make_static!(
+        PubSubChannel::<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (Instant, MACAddress, ConnectionChange),
+            4,
+            1,
+            1,
+        >,
+        PubSubChannel::new()
+    );
     // Spawn task that handles all `controller` actions.
     spawn.must_spawn(controller_task(
         config,
         controller,
         controller_commands.receiver(),
         sta_disconnect.dyn_publisher().unwrap(),
+        ap_sta_connect.dyn_publisher().unwrap(),
     ));
     // Spawn handler before setting callback to avoid pile-up from callback before spawning handler.
     spawn.must_spawn(mesh_algo::connect_to_next_parent(

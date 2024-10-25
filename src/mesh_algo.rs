@@ -15,7 +15,7 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
 use esp_hal::xtensa_lx::mutex::Mutex as _;
-use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, WifiController, WifiEvent};
+use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, StaList, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
 use ieee80211::{
     common::CapabilitiesInformation,
@@ -359,6 +359,12 @@ macro_rules! controller_command {
         )
     };
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectionChange {
+    Connect,
+    Disconnect,
+}
 /// `controller` has to be managed exclusively by this task so events and actions be simultaneously awaited. See "actor model".
 /// Can send commands for what to do next from many other tasks using the channel for `rx`.
 #[embassy_executor::task]
@@ -366,23 +372,27 @@ pub async fn controller_task(
     mut config: Configuration,
     mut controller: WifiController<'static>,
     rx: Receiver<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
-    sta_disconnected_rx: DynPublisher<'static, (Instant, MACAddress)>,
+    sta_disconnected_tx: DynPublisher<'static, (Instant, MACAddress)>,
+    ap_sta_connected_tx: DynPublisher<'static, (Instant, MACAddress, ConnectionChange)>,
 ) {
+    let mut prev_connected = StaList::default();
     loop {
         // Wait for an event from the controller or a message to do something with the controller.
         let res = rx
             .receive()
             .select(controller.wait_for_events(
-                WifiEvent::StaDisconnected | WifiEvent::ApStaconnected,
+                WifiEvent::StaDisconnected
+                    | WifiEvent::ApStaconnected
+                    | WifiEvent::ApStadisconnected,
                 false,
             ))
             .await;
 
         match res {
-            Either::Left(mut msg) => msg.0(&mut config, &mut controller).await,
+            Either::Left(mut cmd) => cmd.0(&mut config, &mut controller).await,
             Either::Right(event) => {
                 if event.contains(WifiEvent::StaDisconnected) {
-                    sta_disconnected_rx.publish_immediate((
+                    sta_disconnected_tx.publish_immediate((
                         Instant::now(),
                         MACAddress(
                             controller
@@ -394,6 +404,30 @@ pub async fn controller_task(
                                 .expect("connected to a bssid"),
                         ),
                     ));
+                }
+                if event.contains(WifiEvent::ApStaconnected) {
+                    let list = esp_wifi::wifi::StaList::get_sta_list().unwrap();
+                    let instant = Instant::now();
+                    for sta in list.0.iter().filter(|sta| !prev_connected.0.contains(sta)) {
+                        ap_sta_connected_tx.publish_immediate((
+                            instant,
+                            sta.0.mac.into(),
+                            ConnectionChange::Connect,
+                        ));
+                    }
+                    prev_connected = list;
+                }
+                if event.contains(WifiEvent::ApStadisconnected) {
+                    let list = esp_wifi::wifi::StaList::get_sta_list().unwrap();
+                    let instant = Instant::now();
+                    for sta in prev_connected.0.iter().filter(|sta| !list.0.contains(sta)) {
+                        ap_sta_connected_tx.publish_immediate((
+                            instant,
+                            sta.0.mac.into(),
+                            ConnectionChange::Disconnect,
+                        ));
+                    }
+                    prev_connected = list;
                 }
                 // TODO other events.
             }
