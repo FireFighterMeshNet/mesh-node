@@ -297,16 +297,18 @@ async fn main(spawn: embassy_executor::Spawner) {
     esp_println::logger::init_logger_from_env();
     esp_hal_embassy::init(timer.timer0);
     let mut rng = Rng::new(peripherals.RNG);
-    let mut prng = {
-        if let Some(seed) = consts::RNG_SEED {
-            SmallRng::seed_from_u64(seed)
-        } else {
-            let mut buf = [0u8; 16];
-            rng.read(&mut buf);
-            SmallRng::from_seed(buf)
-        }
+    let mut prng = if let Some(seed) = consts::RNG_SEED {
+        SmallRng::seed_from_u64(seed)
+    } else {
+        let mut buf = [0u8; 16];
+        rng.read(&mut buf);
+        SmallRng::from_seed(buf)
     };
     log::info!("TREE_LEVEL: {:?}", consts::TREE_LEVEL);
+    log::info!("DENYLIST_MACS:",);
+    for mac in consts::DENYLIST_MACS.into_iter().map(|x| MACAddress(*x)) {
+        log::info!("{mac:?}")
+    }
 
     // Setup wifi.
     let init = esp_wifi::init(
