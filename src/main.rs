@@ -199,7 +199,7 @@ async fn connection(
     let ap_sta_connect = make_static!(
         PubSubChannel::<
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            (Instant, MACAddress, ConnectionChange),
+            (Instant, MACAddress, mesh_algo::ConnectionChange),
             4,
             1,
             1,
