@@ -143,7 +143,7 @@ impl From<&NodeData> for NodeDataBeaconMsg {
 /// Table of all mesh info.
 #[derive(Debug, Clone)]
 pub struct NodeTable {
-    /// [`MacAddress`] of parent currently being connected to.
+    /// [`MACAddress`] of parent currently being connected to.
     /// Should only be [`Some`] while connecting.
     /// Prevents trashing when multiple nodes are simultaneously better than current parent.
     pub pending_parent: Option<MACAddress>,
@@ -185,7 +185,7 @@ static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
     map: FnvIndexMap::new(),
 });
 
-/// [`MacAddress`] for next parent node to connect to.
+/// [`MACAddress`] for next parent node to connect to.
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
 static NEXT_PARENT: Signal<CriticalSectionRawMutex, MACAddress> = Signal::new();
 
