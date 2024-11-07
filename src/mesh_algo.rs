@@ -308,9 +308,11 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
         // Send raw frame using wifi-stack's sequence number.
         // Will give an `ESP_ERR_INVALID_ARG` if sending for most configurations if `use_internal_seq_num` != true when wi-fi is initialized.
         // See <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#side-effects-to-avoid-in-different-scenarios>
+        log::trace!("beacon tx");
         if let Err(e) = sniffer.send_raw_frame(false, &beacon[0..length], true) {
             log::error!("Failed to send beacon: {e:?}")
         }
+        log::trace!("beacon tx'ed");
 
         Timer::after_millis(100).await;
     }
