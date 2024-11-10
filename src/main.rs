@@ -1,5 +1,6 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
+#![feature(async_closure)] // async || syntax
 #![no_std]
 #![no_main]
 #![expect(dead_code)] // Silence errors while prototyping.
@@ -7,12 +8,9 @@
 // extern crate alloc;
 
 use core::{sync::atomic::AtomicU8, u8};
-use embassy_net::{
-    tcp::TcpSocket, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Runner, StackResources, StaticConfigV4,
-};
+use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV4};
 use embassy_sync::{channel::Channel, pubsub::PubSubChannel};
 use embassy_time::{Duration, Instant, WithTimeout};
-use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{GpioPin, Input, Io},
@@ -27,7 +25,7 @@ use esp_wifi::{
     },
 };
 use ieee80211::mac_parser::MACAddress;
-use mesh_algo::controller_task;
+use mesh_algo::{controller_task, Packet};
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
 use util::UnwrapExt;
 
@@ -35,10 +33,12 @@ type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
 
 /// Unsorted utilities.
 #[macro_use]
-pub mod util;
+mod util;
 mod mesh_algo;
 
 mod consts {
+    use embassy_net::{Ipv4Address, Ipv4Cidr};
+
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
     /// SSID shared between all nodes in mesh.
@@ -56,6 +56,12 @@ mod consts {
 
     /// Protocol version.
     pub const PROT_VERSION: u8 = 0;
+
+    /// CIDR used by this node's STA interface.
+    pub const STA_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, UUID + 1), 24);
+
+    /// CIDR used for gateway (AP).
+    pub const AP_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24);
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -223,66 +229,6 @@ async fn connection(
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
 }
 
-/// Answer all tcp requests on port 8000 with some basic html.
-#[embassy_executor::task(pool_size = 2)]
-async fn reply_with_html(socket: &'static mut TcpSocket<'static>) {
-    loop {
-        log::info!("html reply active");
-        err!(
-            socket
-                .accept(IpListenEndpoint {
-                    addr: None,
-                    port: 8000,
-                })
-                .await
-        );
-        log::info!(
-            "Connected: state: {}, local: {:?}, remote: {:?}",
-            socket.state(),
-            socket.local_endpoint(),
-            socket.remote_endpoint()
-        );
-
-        let mut buffer = [0u8; 1500]; // 1500 is an MTU
-        log::info!("read loop");
-        loop {
-            match socket.read(&mut buffer).await {
-                Ok(0) => {
-                    log::info!("EOF");
-                    break;
-                }
-                Ok(_len) => {
-                    // let received = str::from_utf8(&buffer[0..len]).unwrap();
-                    // log::info!("read {}, {:?}", len, &buffer[0..4]);
-                    if buffer.chunks_exact(4).any(|x| x == b"\r\r\n\n") {
-                        break;
-                    }
-                }
-                e @ Err(_) => break err!(e),
-            }
-        }
-        log::info!("Writing...");
-        // let r = socket
-        //     .write_all(b"HTTP/1.0 411 Length Required\r\nContent-Length: 0\r\n\r\n")
-        //     .await;
-        err!(
-            socket
-                .write_all(
-                    b"HTTP/1.0 200 OK\r\n\
-                    Content-Length: 44\r\n\r\n\
-                    <html><body><h1>Hi! From ESP32</body></html>",
-                )
-                .await
-        );
-        log::info!("Flushing with close ...");
-        socket.close();
-        err!(socket.flush().await);
-        log::info!("Flushed and closed");
-        socket.abort();
-        err!(socket.flush().await);
-    }
-}
-
 #[esp_hal_embassy::main]
 async fn main(spawn: embassy_executor::Spawner) {
     // Provides #[global_allocator] with given number of bytes.
@@ -326,18 +272,21 @@ async fn main(spawn: embassy_executor::Spawner) {
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv4_static(StaticConfigV4 {
-            address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24),
-            gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
+            address: consts::AP_CIDR,
+            gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
-        make_static!(StackResources::<3>, StackResources::<3>::new()),
+        make_static!(
+            StackResources::<{ consts::MAX_NODES }>,
+            StackResources::<{ consts::MAX_NODES }>::new()
+        ),
         prng.gen(),
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
         embassy_net::Config::ipv4_static(StaticConfigV4 {
-            address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 53), 24),
-            gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
+            address: consts::STA_CIDR,
+            gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
         make_static!(StackResources::<3>, StackResources::<3>::new()),
@@ -357,25 +306,53 @@ async fn main(spawn: embassy_executor::Spawner) {
         .expect("ap up");
 
     // Start TcpSockets for both stacks.
-    let ap_socket = make_static!(
-        TcpSocket<'static>,
-        TcpSocket::new(
-            ap_stack,
-            make_static!([u8; 2usize.pow(13)], [0; 2usize.pow(13)]),
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)])
-        )
-    );
-    ap_socket.set_timeout(Some(Duration::from_secs(10)));
-    let sta_socket = make_static!(
-        TcpSocket<'static>,
-        TcpSocket::new(
-            sta_stack,
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-        )
-    );
-    sta_socket.set_timeout(Some(Duration::from_secs(10)));
+    macro_rules! forward_socket {
+        ($stack:ident) => {
+            let socket = make_static!(
+                TcpSocket<'static>,
+                TcpSocket::new(
+                    $stack,
+                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+                )
+            );
+            socket.set_timeout(Some(Duration::from_secs(10)));
+            spawn.must_spawn(mesh_algo::accept_sta_and_forward(socket, ap_mac.into()));
+        };
+    }
+    forward_socket!(ap_stack);
+    forward_socket!(ap_stack);
+    forward_socket!(sta_stack);
 
-    spawn.must_spawn(reply_with_html(ap_socket));
-    spawn.must_spawn(reply_with_html(sta_socket));
+    if consts::TREE_LEVEL != Some(0) {
+        let sta_socket = make_static!(
+            TcpSocket<'static>,
+            TcpSocket::new(
+                sta_stack,
+                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+            )
+        );
+        sta_socket.set_timeout(Some(Duration::from_secs(10)));
+
+        // DEBUG: connect to the ap and send a packet to a mac.
+        #[embassy_executor::task]
+        async fn f(mut socket: &'static mut TcpSocket<'static>) {
+            err!(
+                socket
+                    .connect(IpEndpoint::new(consts::AP_CIDR.address().into(), 8000))
+                    .await
+            );
+
+            for _ in 0..10 {
+                let pkt = Packet::new(MACAddress::default(), b"hello world 123").unwrap();
+
+                log::info!("send");
+                if let e @ Err(_) = pkt.send(&mut socket).await {
+                    err!(e);
+                };
+            }
+        }
+        spawn.must_spawn(f(sta_socket));
+    }
 }

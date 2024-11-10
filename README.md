@@ -22,6 +22,7 @@ After following installation you should have `cargo` and `espflash` installed so
 - `dump-packets` emits packets to uart debug interface for use in the wifishark extcap. Slows wifi down.
 
 ## Environment Variables
+- `UUID`: unique id per node. used for per-device configuration.
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.

@@ -86,6 +86,14 @@ fn main() {
             /// Deny listed macs (mostly for debugging) (don't connect to these)
             pub DENYLIST_MACS = parse_mac("DENYLIST_MACS").as_slice()
         ),
+        const_declaration!(
+            /// Unique per device id. In the range `1..=128`.
+            // The range is entirely so the ip can reuse the uuid since we have less nodes than this anyway.
+            UUID = {
+                let out = parse_option_env::<u8>("UUID").expect("UUID env var should be set to value in [1,128]");
+                if (1..=128).contains(&out) { out } else { panic!("UUID not in 1..=128") }
+            }
+        ),
     ]
     .join("\n");
 

@@ -1,5 +1,8 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
 
+mod packet;
+pub use packet::{Packet, PacketHeader};
+
 use crate::{
     connect_to_other_node, consts,
     util::{SelectEither, UnwrapExt},
@@ -7,6 +10,10 @@ use crate::{
 };
 use core::{borrow::Borrow, future::Future, marker::PhantomData};
 use either::Either;
+use embassy_net::{
+    tcp::{TcpReader, TcpSocket},
+    IpListenEndpoint,
+};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender},
@@ -14,6 +21,7 @@ use embassy_sync::{
     signal::Signal,
 };
 use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
+use embedded_io_async::Read;
 use esp_hal::xtensa_lx::mutex::Mutex as _;
 use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, StaList, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
@@ -24,8 +32,37 @@ use ieee80211::{
     mac_parser::MACAddress,
     mgmt_frame::BeaconFrame,
 };
-use scroll::{Pread, Pwrite};
+use scroll::{
+    ctx::{MeasureWith, SizeWith},
+    Pread, Pwrite,
+};
 use stack_dst::Value;
+
+error_set::error_set! {
+    SendToParentErr = {
+        #[display("no parent")]
+        NoParent,
+    } || PacketSendErr || PacketNewErr;
+    SendToChildErr = {
+        #[display("child missing")]
+        NoChild
+    } || PacketSendErr || PacketNewErr;
+    PacketSendErr = {
+        #[display("{source:?}")]
+        Tcp {
+            source: embassy_net::tcp::Error
+        },
+        // #[display("{source:?}")]
+        // ScrollErr {
+        //     source: scroll::Error,
+        // },
+    } || PacketNewErr;
+    PacketNewErr = {
+        /// Too much data for one packet.
+        #[display("data too large for one packet")]
+        TooBig,
+    };
+}
 
 pub type Version = u8;
 pub type Level = u8;
@@ -136,6 +173,134 @@ impl From<&NodeData> for NodeDataBeaconMsg {
         Self {
             version: value.version,
             level: value.level,
+        }
+    }
+}
+
+/// Send the given data, which fits in one packet, to the current parent.
+pub async fn send_to_parent(
+    data: &[u8],
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), SendToParentErr> {
+    let pkt = Packet::new(
+        STATE
+            .borrow()
+            .lock(|table| table.parent)
+            .ok_or(SendToParentErr::NoParent)?,
+        data,
+    )?;
+    pkt.send(socket).await?;
+    Ok(())
+}
+
+/* TODO
+/// Send the given data packet to the given child.
+pub async fn send_to_child() -> Result<(), SendToChildErr> {
+    todo!()
+} */
+
+/// Accept connections on the socket and forward all [`Packet`]s received.
+#[embassy_executor::task(pool_size = consts::MAX_NODES)]
+pub async fn accept_sta_and_forward(socket: &'static mut TcpSocket<'static>, ap_mac: MACAddress) {
+    loop {
+        match socket
+            .accept(IpListenEndpoint {
+                addr: None,
+                port: 8000,
+            })
+            .await
+        {
+            Ok(()) => (),
+            e @ Err(_) => {
+                err!(e);
+                continue;
+            }
+        };
+
+        let (mut rx, _tx) = socket.split();
+        match forward::<core::convert::Infallible>(
+            ap_mac,
+            &mut rx,
+            async |bytes| {
+                // TODO send to other node.
+                esp_println::dbg!(bytes);
+                Ok(())
+            },
+            async |bytes| {
+                // TODO receive data for this node.
+                esp_println::dbg!(bytes);
+                Ok(())
+            },
+        )
+        .await
+        {
+            Ok(()) => (),
+            Err(e) => match e {},
+        };
+    }
+
+    // socket.close();
+    // err!(socket.flush().await);
+    // socket.abort();
+    // err!(socket.flush().await);
+}
+
+/// Forward all [`Packet`]s received from `rx` to `tx_other` or `tx_me` based on destination.
+pub async fn forward<E>(
+    ap_mac: MACAddress,
+    rx: &mut TcpReader<'_>,
+    mut tx_other: impl async FnMut(&[u8]) -> Result<(), E>,
+    mut tx_me: impl async FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut buf = [0u8; {
+        Packet::max_size() // or smaller, but no need for bigger
+    }];
+
+    'packet: loop {
+        // Forward header.
+        match rx
+            .read_exact(&mut buf[..PacketHeader::size_with(&())])
+            .await
+        {
+            Ok(()) => (),
+            Err(e) =>
+            // If no data comes while expecting a header it is fine. Nothing needs to be fixed.
+            {
+                match e {
+                    embedded_io_async::ReadExactError::UnexpectedEof => break 'packet Ok(()),
+                    embedded_io_async::ReadExactError::Other(e) => {
+                        log::trace!("{e:?} waiting for header");
+                        break 'packet Ok(());
+                    }
+                }
+            }
+        }
+        let header = buf.pread::<PacketHeader>(0).todo();
+        let mut bytes_left = header.len();
+        let to_me = header.destination == ap_mac;
+        if !to_me {
+            tx_other(&buf[..PacketHeader::size_with(&())]).await?;
+        }
+
+        // Forward data.
+        loop {
+            let to_read = buf.len().min(bytes_left);
+            match rx.read_exact(&mut buf[..to_read]).await {
+                Ok(()) => (),
+                // TODO Disconnect while expecting more data. This will result in lost data.
+                // At the very least, should probably send `bytes_left` filler to resync the forwarded data.
+                // Better would be to use framing (e.g. COBS).
+                e @ Err(_) => e.todo_msg("missing rest of data"),
+            };
+            if to_me {
+                tx_me(&buf[..to_read]).await?;
+            } else {
+                tx_other(&buf[..to_read]).await?;
+            }
+            bytes_left -= to_read;
+            if bytes_left == 0 {
+                break;
+            }
         }
     }
 }
