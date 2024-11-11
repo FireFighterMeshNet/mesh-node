@@ -38,6 +38,7 @@ mod mesh_algo;
 
 mod consts {
     use embassy_net::{Ipv4Address, Ipv4Cidr};
+    use ieee80211::mac_parser::MACAddress;
 
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
@@ -57,11 +58,31 @@ mod consts {
     /// Protocol version.
     pub const PROT_VERSION: u8 = 0;
 
+    /// UUID from mac
+    pub const fn uuid_from_mac(mac: MACAddress) -> u8 {
+        // let _ = mac;
+        // todo!() // set at build-time
+
+    }
+
+    /// STA ip used by the node's STA interface based on its uuid.
+    pub const fn sta_cidr_from_uuid(uuid: u8) -> Ipv4Cidr {
+        Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, uuid + 1), 24)
+    }
+
     /// CIDR used by this node's STA interface.
-    pub const STA_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, UUID + 1), 24);
+    pub const STA_CIDR: Ipv4Cidr = sta_cidr_from_uuid(UUID);
 
     /// CIDR used for gateway (AP).
     pub const AP_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24);
+
+    /// Port used
+    pub const PORT: u16 = 8000;
+
+    /// cidr from mac
+    pub const fn cidr_from_mac(mac: MACAddress) -> Ipv4Cidr {
+        sta_cidr_from_uuid(uuid_from_mac(mac))
+    }
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -277,8 +298,8 @@ async fn main(spawn: embassy_executor::Spawner) {
             dns_servers: Default::default(),
         }),
         make_static!(
-            StackResources::<{ consts::MAX_NODES }>,
-            StackResources::<{ consts::MAX_NODES }>::new()
+            StackResources::<{ consts::MAX_NODES * 2 }>,
+            StackResources::<{ consts::MAX_NODES * 2 }>::new()
         ),
         prng.gen(),
     );
@@ -305,10 +326,10 @@ async fn main(spawn: embassy_executor::Spawner) {
         .await
         .expect("ap up");
 
-    // Start TcpSockets for both stacks.
+    // Start TcpSockets.
     macro_rules! forward_socket {
         ($stack:ident) => {
-            let socket = make_static!(
+            let rx_socket = make_static!(
                 TcpSocket<'static>,
                 TcpSocket::new(
                     $stack,
@@ -316,13 +337,35 @@ async fn main(spawn: embassy_executor::Spawner) {
                     make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
                 )
             );
-            socket.set_timeout(Some(Duration::from_secs(10)));
-            spawn.must_spawn(mesh_algo::accept_sta_and_forward(socket, ap_mac.into()));
+            let ap_tx_socket = make_static!(
+                TcpSocket<'static>,
+                TcpSocket::new(
+                    ap_stack,
+                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+                )
+            );
+            let sta_tx_socket = make_static!(
+                TcpSocket<'static>,
+                TcpSocket::new(
+                    sta_stack,
+                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+                )
+            );
+            rx_socket.set_timeout(Some(Duration::from_secs(10)));
+            ap_tx_socket.set_timeout(Some(Duration::from_secs(10)));
+            sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
+            spawn.must_spawn(mesh_algo::accept_sta_and_forward(
+                rx_socket,
+                ap_mac.into(),
+                ap_tx_socket,
+                sta_tx_socket,
+            ));
         };
     }
     forward_socket!(ap_stack);
     forward_socket!(ap_stack);
-    forward_socket!(sta_stack);
 
     if consts::TREE_LEVEL != Some(0) {
         let sta_socket = make_static!(
@@ -338,20 +381,26 @@ async fn main(spawn: embassy_executor::Spawner) {
         // DEBUG: connect to the ap and send a packet to a mac.
         #[embassy_executor::task]
         async fn f(mut socket: &'static mut TcpSocket<'static>) {
-            err!(
-                socket
-                    .connect(IpEndpoint::new(consts::AP_CIDR.address().into(), 8000))
-                    .await
-            );
+            if let e @ Err(_) = socket
+                .connect(IpEndpoint::new(
+                    consts::AP_CIDR.address().into(),
+                    consts::PORT,
+                ))
+                .await
+            {
+                err!(e);
+                return;
+            }
 
             for _ in 0..10 {
-                let pkt = Packet::new(MACAddress::default(), b"hello world 123").unwrap();
+                let pkt = Packet::new(consts::ROOT_MAC, b"hello world 123").unwrap();
 
                 log::info!("send");
                 if let e @ Err(_) = pkt.send(&mut socket).await {
                     err!(e);
                 };
             }
+            mesh_algo::socket_force_closed(socket).await;
         }
         spawn.must_spawn(f(sta_socket));
     }

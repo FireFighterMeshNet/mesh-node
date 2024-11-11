@@ -40,6 +40,12 @@ macro_rules! err {
             log::error!("[{}:{}] {e:?}", file!(), line!())
         }
     };
+    ($e:expr, $s:expr) => {
+        if let Err(e) = $e {
+            let s = $s;
+            log::error!("[{}:{}] - {s}: {e:?}", file!(), line!())
+        }
+    };
     (%$e:expr) => {
         if let Err(e) = $e {
             log::error!("[{}:{}] {e}", file!(), line!())

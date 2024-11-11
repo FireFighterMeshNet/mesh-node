@@ -12,7 +12,7 @@ use core::{borrow::Borrow, future::Future, marker::PhantomData};
 use either::Either;
 use embassy_net::{
     tcp::{TcpReader, TcpSocket},
-    IpListenEndpoint,
+    IpEndpoint, IpListenEndpoint,
 };
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -21,7 +21,7 @@ use embassy_sync::{
     signal::Signal,
 };
 use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
-use embedded_io_async::Read;
+use embedded_io_async::{Read, Write};
 use esp_hal::xtensa_lx::mutex::Mutex as _;
 use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, StaList, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
@@ -62,6 +62,11 @@ error_set::error_set! {
         #[display("data too large for one packet")]
         TooBig,
     };
+    /// Errors related to messages received.
+    InvalidMsg = {
+        /// Protocol version of msg doesn't match.
+        Version { version: Version },
+    };
 }
 
 pub type Version = u8;
@@ -71,24 +76,13 @@ pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
 
-/// Errors related to messages received.
-#[derive(Debug, Clone)]
-pub enum InvalidMsg {
-    /// Protocol version of msg doesn't match.
-    Version(Version),
-}
-
 /// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone)]
 pub enum TreePos {
-    /// Above this node in tree.
-    Ancestor,
-    /// Below this node in tree.
-    Descendant,
-    /// Same level in tree.
-    Sibling,
-    /// Descendant of sibling. `esp-mesh` doesn't track these nodes, but we have so few we can.
-    SiblingDescendant,
+    /// Have to go up the tree to reach the node.
+    Up,
+    /// Have to go down the tree through the given child to reach the node.
+    Down(MACAddress),
     /// Not connected to this node.
     #[default]
     Disconnected,
@@ -114,7 +108,9 @@ impl NodeData {
     /// Create a new [`NodeData`] from the first msg received from a node.
     pub fn from_first_msg(msg: NodeDataBeaconMsg) -> Result<Self, InvalidMsg> {
         if msg.version != consts::PROT_VERSION {
-            return Err(InvalidMsg::Version(msg.version));
+            return Err(InvalidMsg::Version {
+                version: msg.version,
+            });
         }
         Ok(Self {
             postion: TreePos::Disconnected,
@@ -125,7 +121,9 @@ impl NodeData {
     /// Update an existing [`NodeData`] with a more recent [`NodeDataBeaconMsg`]
     pub fn update_with_msg(&mut self, msg: NodeDataBeaconMsg) -> Result<(), InvalidMsg> {
         if msg.version != consts::PROT_VERSION {
-            return Err(InvalidMsg::Version(msg.version));
+            return Err(InvalidMsg::Version {
+                version: msg.version,
+            });
         }
         self.version = msg.version;
         self.level = msg.level;
@@ -201,9 +199,16 @@ pub async fn send_to_child() -> Result<(), SendToChildErr> {
 
 /// Accept connections on the socket and forward all [`Packet`]s received.
 #[embassy_executor::task(pool_size = consts::MAX_NODES)]
-pub async fn accept_sta_and_forward(socket: &'static mut TcpSocket<'static>, ap_mac: MACAddress) {
+pub async fn accept_sta_and_forward(
+    rx_socket: &'static mut TcpSocket<'static>,
+    ap_mac: MACAddress,
+    ap_tx_socket: &'static mut TcpSocket<'static>,
+    sta_tx_socket: &'static mut TcpSocket<'static>,
+) {
     loop {
-        match socket
+        rx_socket.close();
+        err!(rx_socket.flush().await);
+        match rx_socket
             .accept(IpListenEndpoint {
                 addr: None,
                 port: 8000,
@@ -213,19 +218,22 @@ pub async fn accept_sta_and_forward(socket: &'static mut TcpSocket<'static>, ap_
             Ok(()) => (),
             e @ Err(_) => {
                 err!(e);
+                log::warn!(
+                    "state: {}, local: {:?}, remote: {:?}",
+                    rx_socket.state(),
+                    rx_socket.local_endpoint(),
+                    rx_socket.remote_endpoint()
+                );
                 continue;
             }
         };
 
-        let (mut rx, _tx) = socket.split();
+        let (mut rx, _tx) = rx_socket.split();
         match forward::<core::convert::Infallible>(
-            ap_mac,
             &mut rx,
-            async |bytes| {
-                // TODO send to other node.
-                esp_println::dbg!(bytes);
-                Ok(())
-            },
+            ap_mac,
+            ap_tx_socket,
+            sta_tx_socket,
             async |bytes| {
                 // TODO receive data for this node.
                 esp_println::dbg!(bytes);
@@ -238,18 +246,65 @@ pub async fn accept_sta_and_forward(socket: &'static mut TcpSocket<'static>, ap_
             Err(e) => match e {},
         };
     }
+}
 
-    // socket.close();
-    // err!(socket.flush().await);
-    // socket.abort();
-    // err!(socket.flush().await);
+/// Close down socket forcefully.
+pub async fn socket_force_closed(socket: &mut TcpSocket<'_>) {
+    socket.close();
+    err!(socket.flush().await);
+    socket.abort();
+    err!(socket.flush().await);
+}
+
+/// Connects using either ap (to child) or sta (to parent) interface to the node on the way to the given mac.
+/// Disconnects from previous if needed to connect to new.
+async fn next_hop_socket<'a>(
+    address: MACAddress,
+    ap_tx_socket: &'a mut TcpSocket<'static>,
+    sta_tx_socket: &'a mut TcpSocket<'static>,
+) -> &'a mut TcpSocket<'static> {
+    // Resolve next-hop.
+    let Some(dest) = STATE.borrow().lock(|table| {
+        table
+            .map
+            .iter()
+            .find(|x| *x.0 == address)
+            .map(|x| (x.0.clone(), x.1.clone()))
+    }) else {
+        todo!("forward mac {address} dest missing");
+    };
+    // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
+    let (ip, tx_socket) = match dest.1.postion {
+        TreePos::Up => (consts::AP_CIDR.address().into_address(), sta_tx_socket),
+        TreePos::Down(child_mac) => (
+            consts::cidr_from_mac(child_mac).address().into_address(),
+            ap_tx_socket,
+        ),
+        TreePos::Disconnected => todo!("forward to an inaccessible node"),
+    };
+
+    // Connect to next-hop if not already connected.
+    if tx_socket.remote_endpoint() != Some(IpEndpoint::new(ip, consts::PORT)) {
+        // Disconnect old.
+        if tx_socket.remote_endpoint().is_some() {
+            socket_force_closed(tx_socket).await;
+        }
+        // Connect new.
+        err!(
+            tx_socket.connect(IpEndpoint::new(ip, consts::PORT)).await,
+            "connect to next hop"
+        );
+    }
+    tx_socket
 }
 
 /// Forward all [`Packet`]s received from `rx` to `tx_other` or `tx_me` based on destination.
+/// Sockets may not be closed when this returns.
 pub async fn forward<E>(
-    ap_mac: MACAddress,
     rx: &mut TcpReader<'_>,
-    mut tx_other: impl async FnMut(&[u8]) -> Result<(), E>,
+    ap_mac: MACAddress,
+    ap_tx_socket: &mut TcpSocket<'static>,
+    sta_tx_socket: &mut TcpSocket<'static>,
     mut tx_me: impl async FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut buf = [0u8; {
@@ -263,9 +318,8 @@ pub async fn forward<E>(
             .await
         {
             Ok(()) => (),
-            Err(e) =>
-            // If no data comes while expecting a header it is fine. Nothing needs to be fixed.
-            {
+            Err(e) => {
+                // If no data comes while expecting a header it is fine. Nothing needs to be fixed.
                 match e {
                     embedded_io_async::ReadExactError::UnexpectedEof => break 'packet Ok(()),
                     embedded_io_async::ReadExactError::Other(e) => {
@@ -278,24 +332,42 @@ pub async fn forward<E>(
         let header = buf.pread::<PacketHeader>(0).todo();
         let mut bytes_left = header.len();
         let to_me = header.destination == ap_mac;
-        if !to_me {
-            tx_other(&buf[..PacketHeader::size_with(&())]).await?;
-        }
+        // Forward header and choose correct socket if the data is not for this node.
+        let mut tx_socket = if to_me {
+            None
+        } else {
+            // Connect to next hop socket and disconnect from previous if needed.
+            let tx_socket = next_hop_socket(header.destination, ap_tx_socket, sta_tx_socket).await;
+            // Send data to next-hop.
+            err!(
+                tx_socket
+                    .write_all(&buf[..PacketHeader::size_with(&())])
+                    .await,
+                "next hop failed write"
+            );
+            Some(tx_socket)
+        };
 
         // Forward data.
         loop {
             let to_read = buf.len().min(bytes_left);
             match rx.read_exact(&mut buf[..to_read]).await {
                 Ok(()) => (),
-                // TODO Disconnect while expecting more data. This will result in lost data.
+                // TODO: Disconnect while expecting more data. This will result in lost data.
                 // At the very least, should probably send `bytes_left` filler to resync the forwarded data.
                 // Better would be to use framing (e.g. COBS).
                 e @ Err(_) => e.todo_msg("missing rest of data"),
             };
-            if to_me {
-                tx_me(&buf[..to_read]).await?;
-            } else {
-                tx_other(&buf[..to_read]).await?;
+            match &mut tx_socket {
+                // Send data to next-hop.
+                Some(tx_socket) => {
+                    err!(
+                        tx_socket.write_all(&buf[..to_read]).await,
+                        "next hop failed write"
+                    );
+                }
+                // Sending to self
+                None => tx_me(&buf[..to_read]).await?,
             }
             bytes_left -= to_read;
             if bytes_left == 0 {
@@ -325,7 +397,10 @@ impl NodeTable {
         if let Some(level) = consts::TREE_LEVEL {
             level
         } else if let Some(parent) = self.parent {
-            self.map[&parent].level + 1
+            // While the node only connects to parents closer to the root and defaults to MAX,
+            // it is possible the connected parent which used to be closer to root disconnects and become Level::MAX,
+            // in which case we saturate instead of wrapping.
+            self.map[&parent].level.saturating_add(1)
         } else {
             Level::MAX
         }
@@ -437,39 +512,40 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
 /// Periodic transmit of beacon with custom vendor data.
 #[embassy_executor::task]
 pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
-    // Buffer for beacon body
-    let mut beacon = [0u8; 256];
-    let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.beacon_msg());
-    let length = beacon
-        .pwrite(
-            BeaconFrame {
-                header: ieee80211::mgmt_frame::ManagementFrameHeader {
-                    transmitter_address: source_mac,
-                    bssid: source_mac,
-                    receiver_address: MACAddress([0xff; 6]), // multicast to all
-                    ..Default::default()
-                },
-                body: ieee80211::mgmt_frame::body::BeaconLikeBody {
-                    timestamp: 0,
-                    beacon_interval: 100,
-                    capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is AP
-                    elements: element_chain! {
-                        SSIDElement::new(consts::SSID).unwrap(),
-                        VendorSpecificElement::new_prefixed(
-                            // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
-                            consts::ESPRESSIF_OUI,
-                            data,
-                        )
-                    },
-                    _phantom: PhantomData,
-                },
-            },
-            0,
-        )
-        .unwrap();
     log::info!("sending vendor-beacons");
 
+    // Buffer for beacon body
+    let mut beacon = [0u8; 256];
     loop {
+        let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.beacon_msg());
+        let length = beacon
+            .pwrite(
+                BeaconFrame {
+                    header: ieee80211::mgmt_frame::ManagementFrameHeader {
+                        transmitter_address: source_mac,
+                        bssid: source_mac,
+                        receiver_address: MACAddress([0xff; 6]), // multicast to all
+                        ..Default::default()
+                    },
+                    body: ieee80211::mgmt_frame::body::BeaconLikeBody {
+                        timestamp: 0,
+                        beacon_interval: 100,
+                        capabilities_info: CapabilitiesInformation::new().with_is_ess(true), // is ess = is AP
+                        elements: element_chain! {
+                            SSIDElement::new(consts::SSID).unwrap(),
+                            VendorSpecificElement::new_prefixed(
+                                // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
+                                consts::ESPRESSIF_OUI,
+                                data,
+                            )
+                        },
+                        _phantom: PhantomData,
+                    },
+                },
+                0,
+            )
+            .unwrap();
+
         // Send raw frame using wifi-stack's sequence number.
         // Will give an `ESP_ERR_INVALID_ARG` if sending for most configurations if `use_internal_seq_num` != true when wi-fi is initialized.
         // See <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#side-effects-to-avoid-in-different-scenarios>
@@ -661,8 +737,11 @@ pub async fn connect_to_next_parent(
                         let parent_level = STATE.borrow().lock(|table| {
                             // Set new parent now that connected.
                             table.parent = Some(next_parent);
+                            // The new parent can be reached by going up (to the parent).
+                            // The old parent is probably still connected, and isn't below this node so it stays `Up` until further notice.
+                            table.map[&next_parent].postion = TreePos::Up;
 
-                            // Unset pending level now that it is set.
+                            // Unset pending now that it is set.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
                             table.pending_parent = None;
 
