@@ -41,6 +41,7 @@ futures-lite = { version = "2.3.0", default-features = false, features = ["race"
 heapless = "0.8.0"
 ieee80211 = "0.5.0"
 log = { version = "0.4.21" }
+phf = { version = "0.11.2", default-features = false, features = ["macros"] }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 scroll = { version = "0.12.0", default-features = false, features = ["derive"]}
 stack_dst = { version = "0.8.1", features = ["unsize"] }

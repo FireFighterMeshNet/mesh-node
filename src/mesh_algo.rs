@@ -277,7 +277,10 @@ async fn next_hop_socket<'a>(
     let (ip, tx_socket) = match dest.1.postion {
         TreePos::Up => (consts::AP_CIDR.address().into_address(), sta_tx_socket),
         TreePos::Down(child_mac) => (
-            consts::cidr_from_mac(child_mac).address().into_address(),
+            crate::config::sta_cidr_from_mac(child_mac)
+                .todo_msg("child mac not in mac2uuid")
+                .address()
+                .into_address(),
             ap_tx_socket,
         ),
         TreePos::Disconnected => todo!("forward to an inaccessible node"),

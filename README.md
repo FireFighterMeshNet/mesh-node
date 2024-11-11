@@ -22,11 +22,14 @@ After following installation you should have `cargo` and `espflash` installed so
 - `dump-packets` emits packets to uart debug interface for use in the wifishark extcap. Slows wifi down.
 
 ## Environment Variables
-- `UUID`: unique id per node. used for per-device configuration.
+- `ROOT_MAC`: MAC address of root node.
+- `UUID_TO_MAC`: translation of each mac in the network to a unique id between 1 and 128. e.g. `12:34:56:78:9a:bc_01,12:34:56:78:9a:de_02`
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
 - `DENYLIST_MACS`: (optional) comma seperated list of hex code mac address like `12:34:56:78:9a:bc,12:34:56:78:9a:de` to ignore and not connect to.
+
+See the `build.rs` for details.
 
 # Security
 - Currently, the implementation can easily be tricked by another AP with the same ssid sending custom beacons.

@@ -58,30 +58,32 @@ mod consts {
     /// Protocol version.
     pub const PROT_VERSION: u8 = 0;
 
-    /// UUID from mac
-    pub const fn uuid_from_mac(mac: MACAddress) -> u8 {
-        // let _ = mac;
-        // todo!() // set at build-time
-
-    }
-
-    /// STA ip used by the node's STA interface based on its uuid.
-    pub const fn sta_cidr_from_uuid(uuid: u8) -> Ipv4Cidr {
-        Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, uuid + 1), 24)
-    }
-
-    /// CIDR used by this node's STA interface.
-    pub const STA_CIDR: Ipv4Cidr = sta_cidr_from_uuid(UUID);
-
     /// CIDR used for gateway (AP).
     pub const AP_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24);
 
     /// Port used
     pub const PORT: u16 = 8000;
 
-    /// cidr from mac
-    pub const fn cidr_from_mac(mac: MACAddress) -> Ipv4Cidr {
-        sta_cidr_from_uuid(uuid_from_mac(mac))
+    // `MACAddress` of the root node
+    // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
+    pub const ROOT_MAC: MACAddress = MACAddress(ROOT_MAC_ARR);
+}
+mod config {
+    use crate::consts::*;
+    use embassy_net::{Ipv4Address, Ipv4Cidr};
+    use ieee80211::mac_parser::MACAddress;
+
+    /// UUID from MAC. This crate currently uses the AP MAC as canonical per node (i.e. not the sta interface's mac).
+    pub fn uuid_from_mac(mac: MACAddress) -> Option<u8> {
+        MAC_TO_UUID.get(&mac.0).map(|x| *x)
+    }
+    /// STA ip used by the node's STA interface based on its UUID.
+    pub fn sta_cidr_from_uuid(uuid: u8) -> Ipv4Cidr {
+        Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, uuid + 1), 24)
+    }
+    /// `Ipv4Cidr` from `MACAddress`
+    pub fn sta_cidr_from_mac(mac: MACAddress) -> Option<Ipv4Cidr> {
+        uuid_from_mac(mac).map(|mac| sta_cidr_from_uuid(mac))
     }
 }
 
@@ -288,7 +290,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     let wifi = peripherals.WIFI;
     let (wifi_ap_interface, wifi_sta_interface, controller) =
         esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
-    let ap_mac = wifi_ap_interface.mac_address();
+    let ap_mac = MACAddress(wifi_ap_interface.mac_address());
     // let sta_mac = wifi_sta_interface.mac_address();
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
@@ -306,7 +308,8 @@ async fn main(spawn: embassy_executor::Spawner) {
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
         embassy_net::Config::ipv4_static(StaticConfigV4 {
-            address: consts::STA_CIDR,
+            address: config::sta_cidr_from_mac(ap_mac)
+                .unwrap_or_else(|| panic!("{} missing from mac2uuid", ap_mac)),
             gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
@@ -316,7 +319,7 @@ async fn main(spawn: embassy_executor::Spawner) {
 
     spawn.must_spawn(ap_task(ap_runner));
     spawn.must_spawn(sta_task(sta_runner));
-    spawn.must_spawn(connection(spawn, controller, ap_mac.into()));
+    spawn.must_spawn(connection(spawn, controller, ap_mac));
     spawn.must_spawn(boot_button_reply(io.pins.gpio0));
 
     // Wait for AP stack to finish startup.
@@ -358,7 +361,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
             spawn.must_spawn(mesh_algo::accept_sta_and_forward(
                 rx_socket,
-                ap_mac.into(),
+                ap_mac,
                 ap_tx_socket,
                 sta_tx_socket,
             ));
