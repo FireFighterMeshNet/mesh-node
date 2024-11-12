@@ -2,7 +2,6 @@
 
 use const_gen::{const_declaration, CompileConst};
 use std::{
-    collections::HashMap,
     env::{self, VarError},
     fs,
     num::ParseIntError,
@@ -80,41 +79,6 @@ fn parse_mac_list(env: &'static str) -> Vec<MACAddress> {
     }
 }
 
-/// Parse a list of macs with an additional number like `12:34:56:78:9a:bc_01,12:34:56:78:9a:de_02`
-fn parse_mac_to_uuid_map(env: &'static str) -> Vec<(MACAddress, u8)> {
-    println!("cargo::rerun-if-env-changed={}", env);
-    match std::env::var(env) {
-        Ok(env_str) => match {
-            (|| {
-                let mut macs = Vec::new();
-                let mut i = 0;
-                while i < env_str.len() {
-                    let (rest, mac) = parse_mac(&env_str[i..])?;
-                    let rest = &rest[1..]; // skip `_` seperator
-                    let uuid: u8 = u8::from_str_radix(&rest[0..2], 16)?;
-                    if !(1..=128).contains(&uuid) {
-                        panic!("UUIDs must be in 1..=128")
-                    }
-                    macs.push((mac, uuid));
-                    i += 17 + 1 + 2 + 1; // skip 17 mac chars + 1 seperator + 2 uuid + 1 seperator
-                }
-                Ok::<_, std::num::ParseIntError>(macs)
-            })()
-        } {
-            Ok(s) => s,
-            Err(e) => {
-                println!("cargo::warning={:?} env var invalid: {e}", env);
-                Vec::new()
-            }
-        },
-        Err(VarError::NotPresent) => Vec::new(),
-        Err(e) => {
-            println!("cargo::warning={:?} env var invalid: {e}", env);
-            Vec::new()
-        }
-    }
-}
-
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
 
@@ -137,10 +101,6 @@ fn main() {
         const_declaration!(
             /// Root MAC as an array.
             pub ROOT_MAC_ARR = parse_mac_list("ROOT_MAC").first().expect("ROOT_MAC should be set")
-        ),
-        const_declaration!(
-            /// Translation from macs to uuid.
-            pub MAC_TO_UUID = parse_mac_to_uuid_map("MAC_TO_UUID").into_iter().collect::<HashMap<MACAddress, u8>>()
         ),
     ]
     .join("\n");

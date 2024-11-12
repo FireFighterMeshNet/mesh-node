@@ -8,11 +8,12 @@
 // extern crate alloc;
 
 use core::{sync::atomic::AtomicU8, u8};
-use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV4};
+use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV6};
 use embassy_sync::{channel::Channel, pubsub::PubSubChannel};
 use embassy_time::{Duration, Instant, WithTimeout};
 use esp_backtrace as _;
 use esp_hal::{
+    config::{WatchdogConfig, WatchdogStatus},
     gpio::{GpioPin, Input, Io},
     rng::Rng,
     timer::timg::TimerGroup,
@@ -37,7 +38,7 @@ mod util;
 mod mesh_algo;
 
 mod consts {
-    use embassy_net::{Ipv4Address, Ipv4Cidr};
+    use embassy_net::{Ipv6Address, Ipv6Cidr};
     use ieee80211::mac_parser::MACAddress;
 
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
@@ -58,8 +59,21 @@ mod consts {
     /// Protocol version.
     pub const PROT_VERSION: u8 = 0;
 
+    pub const IP_PREFIX_LEN: u8 = 48;
+
     /// CIDR used for gateway (AP).
-    pub const AP_CIDR: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24);
+    /// `fc00` prefix is dedicated to private networks.
+    pub const AP_CIDR: Ipv6Cidr =
+        Ipv6Cidr::new(Ipv6Address::new(0xfc00, 0, 0, 0, 0, 0, 0, 1), IP_PREFIX_LEN);
+
+    /// `Ipv6Cidr` from `MACAddress` by embedding the mac as the last 6 bytes of address.
+    pub const fn sta_cidr_from_mac(mac: MACAddress) -> Ipv6Cidr {
+        let mac_ip: [u8; 16] = [
+            0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac.0[5], mac.0[4], mac.0[3], mac.0[2], mac.0[1],
+            mac.0[0],
+        ];
+        Ipv6Cidr::new(Ipv6Address(mac_ip), IP_PREFIX_LEN)
+    }
 
     /// Port used
     pub const PORT: u16 = 8000;
@@ -67,24 +81,6 @@ mod consts {
     // `MACAddress` of the root node
     // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
     pub const ROOT_MAC: MACAddress = MACAddress(ROOT_MAC_ARR);
-}
-mod config {
-    use crate::consts::*;
-    use embassy_net::{Ipv4Address, Ipv4Cidr};
-    use ieee80211::mac_parser::MACAddress;
-
-    /// UUID from MAC. This crate currently uses the AP MAC as canonical per node (i.e. not the sta interface's mac).
-    pub fn uuid_from_mac(mac: MACAddress) -> Option<u8> {
-        MAC_TO_UUID.get(&mac.0).map(|x| *x)
-    }
-    /// STA ip used by the node's STA interface based on its UUID.
-    pub fn sta_cidr_from_uuid(uuid: u8) -> Ipv4Cidr {
-        Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, uuid + 1), 24)
-    }
-    /// `Ipv4Cidr` from `MACAddress`
-    pub fn sta_cidr_from_mac(mac: MACAddress) -> Option<Ipv4Cidr> {
-        uuid_from_mac(mac).map(|mac| sta_cidr_from_uuid(mac))
-    }
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -260,7 +256,15 @@ async fn main(spawn: embassy_executor::Spawner) {
     esp_alloc::heap_allocator!(72_000);
 
     // Setup and configuration.
-    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let peripherals = esp_hal::init({
+        let mut out = esp_hal::Config::default();
+        out.watchdog = {
+            let mut out = WatchdogConfig::default();
+            out.rwdt = WatchdogStatus::Enabled(esp_hal::delay::MicrosDurationU64::Hz(5));
+            out
+        };
+        out
+    });
     let timer = TimerGroup::new(peripherals.TIMG0);
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     esp_println::logger::init_logger_from_env();
@@ -294,7 +298,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     // let sta_mac = wifi_sta_interface.mac_address();
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
-        embassy_net::Config::ipv4_static(StaticConfigV4 {
+        embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: consts::AP_CIDR,
             gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
@@ -307,9 +311,8 @@ async fn main(spawn: embassy_executor::Spawner) {
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
-        embassy_net::Config::ipv4_static(StaticConfigV4 {
-            address: config::sta_cidr_from_mac(ap_mac)
-                .unwrap_or_else(|| panic!("{} missing from mac2uuid", ap_mac)),
+        embassy_net::Config::ipv6_static(StaticConfigV6 {
+            address: consts::sta_cidr_from_mac(ap_mac),
             gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
