@@ -814,6 +814,7 @@ dependencies = [
  "scroll",
  "stack_dst",
  "static_cell",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1849,6 +1850,26 @@ version = "0.2.2"
 source = "git+https://github.com/Easyoakland/esp-hal/?branch=sta-list#8e3872fc0d4744b746f7935b869e78839421ab30"
 dependencies = [
  "darling",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49e690f8f352f4a9ee8679a8c5921f42ffd0d6d6413a0a66b8e81cf524e109c"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa732fcc881df7a6fbe8e3ed17baadece53b379ad58fe2633396b1a2b108a7b1"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.87",

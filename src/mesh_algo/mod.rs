@@ -35,10 +35,7 @@ use ieee80211::{
     mgmt_frame::BeaconFrame,
 };
 use node_data::{NodeData, NodeDataBeaconMsg, NodeTable};
-use scroll::{
-    ctx::{MeasureWith, SizeWith},
-    Pread, Pwrite,
-};
+use scroll::{ctx::SizeWith, Pread, Pwrite};
 use stack_dst::Value;
 
 error_set::error_set! {
@@ -59,7 +56,7 @@ error_set::error_set! {
         // ScrollErr {
         //     source: scroll::Error,
         // },
-    } || PacketNewErr;
+    };
     PacketNewErr = {
         /// Too much data for one packet.
         #[display("data too large for one packet")]
@@ -78,6 +75,50 @@ pub type Level = u8;
 pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
+
+/// Implement the [`scroll`] traits using [`zerocopy`]
+macro_rules! impl_scroll_with_zerocopy {
+    ($ty:ident) => {
+        impl scroll::ctx::TryIntoCtx for $ty {
+            type Error = scroll::Error;
+
+            fn try_into_ctx(self, dst: &mut [u8], _ctx: ()) -> Result<usize, Self::Error> {
+                use zerocopy::IntoBytes;
+                let bytes = self.as_bytes();
+                let offset = &mut 0;
+                dst.gwrite(bytes, offset)?;
+                Ok(*offset)
+            }
+        }
+        impl scroll::ctx::TryFromCtx<'_> for $ty {
+            type Error = scroll::Error;
+
+            fn try_from_ctx(from: &[u8], _ctx: ()) -> Result<(Self, usize), Self::Error> {
+                use zerocopy::FromBytes;
+                Ok((
+                    Self::read_from_prefix(from)
+                        .map_err(|_| scroll::Error::TooBig {
+                            size: size_of::<Self>(),
+                            len: from.len(),
+                        })?
+                        .0,
+                    size_of::<Self>(),
+                ))
+            }
+        }
+        impl scroll::ctx::MeasureWith<()> for $ty {
+            fn measure_with(&self, _: &()) -> usize {
+                size_of::<Self>()
+            }
+        }
+        impl scroll::ctx::SizeWith<()> for $ty {
+            fn size_with(_: &()) -> usize {
+                size_of::<Self>()
+            }
+        }
+    };
+}
+pub(crate) use impl_scroll_with_zerocopy;
 
 /// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone)]
@@ -250,13 +291,14 @@ pub async fn forward<E>(
         }
         let header = buf.pread::<PacketHeader>(0).todo();
         let mut bytes_left = header.len();
-        let to_me = header.destination == ap_mac;
+        let to_me = header.destination() == ap_mac;
         // Forward header and choose correct socket if the data is not for this node.
         let mut tx_socket = if to_me {
             None
         } else {
             // Connect to next hop socket and disconnect from previous if needed.
-            let tx_socket = next_hop_socket(header.destination, ap_tx_socket, sta_tx_socket).await;
+            let tx_socket =
+                next_hop_socket(header.destination(), ap_tx_socket, sta_tx_socket).await;
             // Send data to next-hop.
             err!(
                 tx_socket

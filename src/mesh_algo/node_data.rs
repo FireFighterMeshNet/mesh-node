@@ -44,40 +44,22 @@ impl NodeData {
 }
 
 /// Beacon message per node.
-#[derive(Debug, Clone)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::Immutable,
+    zerocopy::KnownLayout,
+    zerocopy::Unaligned,
+)]
+#[repr(C)]
 pub struct NodeDataBeaconMsg {
     pub version: Version,
     pub level: Level,
 }
-impl scroll::ctx::TryIntoCtx for NodeDataBeaconMsg {
-    type Error = scroll::Error;
-
-    fn try_into_ctx(self, dst: &mut [u8], _ctx: ()) -> Result<usize, Self::Error> {
-        let offset = &mut 0;
-
-        dst.gwrite_with(self.version, offset, scroll::NETWORK)?;
-        dst.gwrite_with(self.level, offset, scroll::NETWORK)?;
-
-        Ok(*offset)
-    }
-}
-impl scroll::ctx::TryFromCtx<'_> for NodeDataBeaconMsg {
-    type Error = scroll::Error;
-
-    fn try_from_ctx(from: &[u8], _ctx: ()) -> Result<(Self, usize), Self::Error> {
-        let offset = &mut 0;
-
-        let version = from.gread_with(offset, scroll::NETWORK)?;
-        let level = from.gread_with(offset, scroll::NETWORK)?;
-
-        Ok((Self { version, level }, *offset))
-    }
-}
-impl scroll::ctx::MeasureWith<()> for NodeDataBeaconMsg {
-    fn measure_with(&self, _: &()) -> usize {
-        size_of::<Self>()
-    }
-}
+impl_scroll_with_zerocopy!(NodeDataBeaconMsg);
 impl From<&NodeData> for NodeDataBeaconMsg {
     fn from(value: &NodeData) -> Self {
         Self {

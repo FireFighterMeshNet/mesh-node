@@ -46,6 +46,7 @@ rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 scroll = { version = "0.12.0", default-features = false, features = ["derive"]}
 stack_dst = { version = "0.8.1", features = ["unsize"] }
 static_cell = "2.1.0"
+zerocopy = { version = "0.8.9", features = ["derive"] }
 
 [patch.crates-io]
 # change back to regular release after <https://github.com/embassy-rs/embassy/pull/3198> is included
