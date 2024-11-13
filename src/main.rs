@@ -10,13 +10,15 @@
 use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV6};
 use embassy_sync::{channel::Channel, pubsub::PubSubChannel};
-use embassy_time::{Duration, Instant, WithTimeout};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use esp_backtrace as _;
 use esp_hal::{
-    config::{WatchdogConfig, WatchdogStatus},
     gpio::{GpioPin, Input, Io},
+    macros::handler,
+    peripherals::TIMG0,
     rng::Rng,
-    timer::timg::TimerGroup,
+    timer::timg::{TimerGroup, Wdt},
+    InterruptConfigurable,
 };
 use esp_wifi::{
     self,
@@ -29,8 +31,6 @@ use ieee80211::mac_parser::MACAddress;
 use mesh_algo::{controller_task, Packet};
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
 use util::UnwrapExt;
-
-type Mutex<T> = esp_hal::xtensa_lx::mutex::SpinLockMutex<T>;
 
 /// Unsorted utilities.
 #[macro_use]
@@ -248,6 +248,33 @@ async fn connection(
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
 }
 
+#[handler]
+fn print_backtrace() {
+    esp_println::println!("Watchdog backtrace:");
+    for addr in esp_backtrace::arch::backtrace().into_iter().flatten() {
+        // copied from `esp_backtrace` internals.
+        esp_println::println!("0x{:x}", addr - 3)
+    }
+}
+
+/// Setup a watchdog and `feed` it periodically. If this isn't polled frequently enough the `ProCPU` restarts.
+#[embassy_executor::task]
+async fn feed_wdt() -> ! {
+    let mut wdt = Wdt::<TIMG0>::default();
+    // TODO: It doesn't seem like the interrupt is actually called.
+    // Fortunately, the default handler for `Wdt` (not RTC) watchdogs seems to print a line from the stacktrace.
+    // It would be nice if this worked, though.
+    wdt.set_interrupt_handler(print_backtrace);
+    wdt.enable();
+    // Note: This doesn't seem to do anything when less than 380000us
+    wdt.set_timeout(esp_hal::delay::MicrosDurationU64::secs(5));
+    loop {
+        wdt.feed();
+        // 1 second leeway on watchdog timeout.
+        Timer::after_secs(4).await;
+    }
+}
+
 #[esp_hal_embassy::main]
 async fn main(spawn: embassy_executor::Spawner) {
     // Provides #[global_allocator] with given number of bytes.
@@ -256,15 +283,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     esp_alloc::heap_allocator!(72_000);
 
     // Setup and configuration.
-    let peripherals = esp_hal::init({
-        let mut out = esp_hal::Config::default();
-        out.watchdog = {
-            let mut out = WatchdogConfig::default();
-            out.rwdt = WatchdogStatus::Enabled(esp_hal::delay::MicrosDurationU64::Hz(5));
-            out
-        };
-        out
-    });
+    let peripherals = esp_hal::init(esp_hal::Config::default());
     let timer = TimerGroup::new(peripherals.TIMG0);
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     esp_println::logger::init_logger_from_env();
@@ -277,6 +296,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         rng.read(&mut buf);
         SmallRng::from_seed(buf)
     };
+    spawn.must_spawn(feed_wdt());
     log::info!("TREE_LEVEL: {:?}", consts::TREE_LEVEL);
     log::info!("DENYLIST_MACS:",);
     for mac in consts::DENYLIST_MACS.into_iter().map(|x| MACAddress(*x)) {

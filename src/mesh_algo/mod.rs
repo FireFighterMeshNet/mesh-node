@@ -8,9 +8,9 @@ pub use packet::{Packet, PacketHeader};
 use crate::{
     connect_to_other_node, consts,
     util::{SelectEither, UnwrapExt},
-    Mutex,
 };
-use core::{borrow::Borrow, future::Future, marker::PhantomData};
+use core::{cell::RefCell, future::Future, marker::PhantomData};
+use critical_section::Mutex;
 use either::Either;
 use embassy_net::{
     tcp::{TcpReader, TcpSocket},
@@ -24,7 +24,6 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
 use embedded_io_async::{Read, Write};
-use esp_hal::xtensa_lx::mutex::Mutex as _;
 use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, StaList, WifiController, WifiEvent};
 use heapless::FnvIndexMap;
 use ieee80211::{
@@ -138,9 +137,7 @@ pub async fn send_to_parent(
     socket: &mut TcpSocket<'_>,
 ) -> Result<(), SendToParentErr> {
     let pkt = Packet::new(
-        STATE
-            .borrow()
-            .lock(|table| table.parent)
+        critical_section::with(|cs| STATE.borrow_ref_mut(cs).parent)
             .ok_or(SendToParentErr::NoParent)?,
         data,
     )?;
@@ -221,8 +218,9 @@ async fn next_hop_socket<'a>(
     sta_tx_socket: &'a mut TcpSocket<'static>,
 ) -> &'a mut TcpSocket<'static> {
     // Resolve next-hop.
-    let Some(dest) = STATE.borrow().lock(|table| {
-        table
+    let Some(dest) = critical_section::with(|cs| {
+        STATE
+            .borrow_ref_mut(cs)
             .map
             .iter()
             .find(|x| *x.0 == address)
@@ -338,11 +336,11 @@ pub async fn forward<E>(
 }
 
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
-static STATE: Mutex<NodeTable> = Mutex::new(NodeTable {
+static STATE: Mutex<RefCell<NodeTable>> = Mutex::new(RefCell::new(NodeTable {
     pending_parent: None,
     parent: None,
     map: FnvIndexMap::new(),
-});
+}));
 
 /// [`MACAddress`] for next parent node to connect to.
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
@@ -381,7 +379,9 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
 
         // Apply new message to state.
         let (me_level, new_node_level, current_parent, pending_parent) =
-            STATE.borrow().lock(|table| {
+            critical_section::with(|cs| {
+                let table = &mut *STATE.borrow_ref_mut(cs);
+
                 (|| match table.map.entry(candidate_parent) {
                     heapless::Entry::Occupied(mut occupied_entry) => {
                         occupied_entry.get_mut().update_with_msg(data)
@@ -416,9 +416,9 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
             let is_current_parent = Some(candidate_parent) == current_parent;
 
             if !already_connecting && closer_than_parent && !is_current_parent {
-                STATE
-                    .borrow()
-                    .lock(|table| table.pending_parent = Some(candidate_parent));
+                critical_section::with(|cs| {
+                    STATE.borrow_ref_mut(cs).pending_parent = Some(candidate_parent)
+                });
                 NEXT_PARENT.signal(candidate_parent);
             }
         }
@@ -436,7 +436,8 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
     // Buffer for beacon body
     let mut beacon = [0u8; 256];
     loop {
-        let data: NodeDataBeaconMsg = STATE.borrow().lock(|table| table.beacon_msg());
+        let data: NodeDataBeaconMsg =
+            critical_section::with(|cs| STATE.borrow_ref_mut(cs).beacon_msg());
         let length = beacon
             .pwrite(
                 BeaconFrame {
@@ -653,7 +654,9 @@ pub async fn connect_to_next_parent(
                     Ok(Ok(instant)) => {
                         last_connected = instant;
 
-                        let parent_level = STATE.borrow().lock(|table| {
+                        let parent_level = critical_section::with(|cs| {
+                            let table = &mut *STATE.borrow_ref_mut(cs);
+
                             // Set new parent now that connected.
                             table.parent = Some(next_parent);
                             // The new parent can be reached by going up (to the parent).
@@ -671,7 +674,9 @@ pub async fn connect_to_next_parent(
                         }
                     }
                     Ok(Err(e)) => {
-                        STATE.borrow().lock(|table| {
+                        critical_section::with(|cs| {
+                            let table = &mut *STATE.borrow_ref_mut(cs);
+
                             table.mark_me_disconnected();
                             // Even on connection fail clear the pending parent so search can find new parent.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
@@ -680,7 +685,9 @@ pub async fn connect_to_next_parent(
                         log::warn!("failed connect: mac={next_parent}: {e:?}")
                     }
                     Err(e) => {
-                        STATE.borrow().lock(|table| {
+                        critical_section::with(|cs| {
+                            let table = &mut *STATE.borrow_ref_mut(cs);
+
                             table.mark_me_disconnected();
                             // Even on connection fail clear the pending parent so search can find new parent.
                             // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
@@ -691,7 +698,7 @@ pub async fn connect_to_next_parent(
                 }
             }
             Either::Right(_) => {
-                STATE.borrow().lock(|table| table.mark_me_disconnected());
+                critical_section::with(|cs| STATE.borrow_ref_mut(cs).mark_me_disconnected());
                 log::warn!("STA disconnected");
             }
         }
