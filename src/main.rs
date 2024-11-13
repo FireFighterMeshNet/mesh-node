@@ -75,6 +75,19 @@ mod consts {
         Ipv6Cidr::new(Ipv6Address(mac_ip), IP_PREFIX_LEN)
     }
 
+    /// `MACAddress` from `Ipv6Cidr` by extracting the embedded mac.
+    pub const fn mac_from_sta_cidr(ip: Ipv6Cidr) -> MACAddress {
+        let address = ip.address().0;
+        MACAddress([
+            address[address.len() - 6],
+            address[address.len() - 5],
+            address[address.len() - 4],
+            address[address.len() - 3],
+            address[address.len() - 2],
+            address[address.len() - 1],
+        ])
+    }
+
     /// Port used
     pub const PORT: u16 = 8000;
 
@@ -85,7 +98,7 @@ mod consts {
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
 #[embassy_executor::task]
-async fn boot_button_reply(gpio0: GpioPin<0>) {
+async fn boot_button_reply(gpio0: GpioPin<0>) -> ! {
     let mut boot_button = Input::new(gpio0, esp_hal::gpio::Pull::None);
 
     let mut i = 0u8;
@@ -98,13 +111,13 @@ async fn boot_button_reply(gpio0: GpioPin<0>) {
 
 /// Run the AP network stack so the WifiAP responds to network events.
 #[embassy_executor::task]
-async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) {
+async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) -> ! {
     runner.run().await
 }
 
 /// Run the STA network stack so the WifiSta responds to network events.
 #[embassy_executor::task]
-async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
+async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) -> ! {
     runner.run().await
 }
 

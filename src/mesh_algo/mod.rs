@@ -115,7 +115,7 @@ pub async fn accept_sta_and_forward(
     ap_mac: MACAddress,
     ap_tx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
-) {
+) -> ! {
     loop {
         rx_socket.close();
         err!(rx_socket.flush().await);
@@ -174,7 +174,7 @@ async fn next_hop_socket<'a>(
     ap_tx_socket: &'a mut TcpSocket<'static>,
     sta_tx_socket: &'a mut TcpSocket<'static>,
 ) -> &'a mut TcpSocket<'static> {
-    // TODO: broadcast address should broadcast to all children and ap.
+    // TODO: broadcast address should broadcast to all children and parent.
 
     // Resolve next-hop.
     let Some(dest) = critical_section::with(|cs| {
@@ -389,7 +389,7 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
 
 /// Periodic transmit of beacon with custom vendor data.
 #[embassy_executor::task]
-pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) {
+pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> ! {
     log::info!("sending vendor-beacons");
 
     // Buffer for beacon body
@@ -496,7 +496,7 @@ pub async fn controller_task(
     rx: Receiver<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
     sta_disconnected_tx: DynPublisher<'static, (Instant, MACAddress)>,
     ap_sta_connected_tx: DynPublisher<'static, (Instant, MACAddress, ConnectionChange)>,
-) {
+) -> ! {
     let mut prev_connected = StaList::default();
     loop {
         // Wait for an event from the controller or a message to do something with the controller.
