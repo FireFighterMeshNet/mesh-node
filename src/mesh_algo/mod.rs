@@ -1,5 +1,6 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
 
+mod macros;
 mod node_data;
 mod packet;
 
@@ -74,50 +75,6 @@ pub type Level = u8;
 pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
-
-/// Implement the [`scroll`] traits using [`zerocopy`]
-macro_rules! impl_scroll_with_zerocopy {
-    ($ty:ident) => {
-        impl scroll::ctx::TryIntoCtx for $ty {
-            type Error = scroll::Error;
-
-            fn try_into_ctx(self, dst: &mut [u8], _ctx: ()) -> Result<usize, Self::Error> {
-                use zerocopy::IntoBytes;
-                let bytes = self.as_bytes();
-                let offset = &mut 0;
-                dst.gwrite(bytes, offset)?;
-                Ok(*offset)
-            }
-        }
-        impl scroll::ctx::TryFromCtx<'_> for $ty {
-            type Error = scroll::Error;
-
-            fn try_from_ctx(from: &[u8], _ctx: ()) -> Result<(Self, usize), Self::Error> {
-                use zerocopy::FromBytes;
-                Ok((
-                    Self::read_from_prefix(from)
-                        .map_err(|_| scroll::Error::TooBig {
-                            size: size_of::<Self>(),
-                            len: from.len(),
-                        })?
-                        .0,
-                    size_of::<Self>(),
-                ))
-            }
-        }
-        impl scroll::ctx::MeasureWith<()> for $ty {
-            fn measure_with(&self, _: &()) -> usize {
-                size_of::<Self>()
-            }
-        }
-        impl scroll::ctx::SizeWith<()> for $ty {
-            fn size_with(_: &()) -> usize {
-                size_of::<Self>()
-            }
-        }
-    };
-}
-pub(crate) use impl_scroll_with_zerocopy;
 
 /// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone)]
@@ -217,6 +174,8 @@ async fn next_hop_socket<'a>(
     ap_tx_socket: &'a mut TcpSocket<'static>,
     sta_tx_socket: &'a mut TcpSocket<'static>,
 ) -> &'a mut TcpSocket<'static> {
+    // TODO: broadcast address should broadcast to all children and ap.
+
     // Resolve next-hop.
     let Some(dest) = critical_section::with(|cs| {
         STATE

@@ -59,7 +59,7 @@ pub struct NodeDataBeaconMsg {
     pub version: Version,
     pub level: Level,
 }
-impl_scroll_with_zerocopy!(NodeDataBeaconMsg);
+macros::impl_scroll_with_zerocopy!(NodeDataBeaconMsg);
 impl From<&NodeData> for NodeDataBeaconMsg {
     fn from(value: &NodeData) -> Self {
         Self {

@@ -34,7 +34,7 @@ impl PacketHeader {
         self.destination = destination.0;
     }
 }
-impl_scroll_with_zerocopy!(PacketHeader);
+macros::impl_scroll_with_zerocopy!(PacketHeader);
 
 #[derive(Debug, Clone)]
 pub struct Packet<'a> {
