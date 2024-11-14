@@ -9,11 +9,10 @@
 
 use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV6};
-use embassy_sync::{channel::Channel, pubsub::PubSubChannel};
-use embassy_time::{Duration, Instant, Timer, WithTimeout};
+use embassy_time::{Duration, Timer, WithTimeout};
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::{GpioPin, Input, Io},
+    gpio::{GpioPin, Input},
     macros::handler,
     peripherals::TIMG0,
     rng::Rng,
@@ -26,9 +25,10 @@ use esp_wifi::{
         Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiError,
         WifiStaDevice,
     },
+    EspWifiController,
 };
 use ieee80211::mac_parser::MACAddress;
-use mesh_algo::{controller_task, Packet};
+use mesh_algo::Packet;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
 use util::UnwrapExt;
 
@@ -153,18 +153,20 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
 }
 
 /// Try `retries` times to connect.
+/// # Panics
+/// If Wifi is not intialized with STA.
 async fn connect_to_other_node(
-    config: &mut Configuration,
     controller: &mut WifiController<'static>,
     bssid: MACAddress,
     retries: usize,
 ) -> Result<(), WifiError> {
-    if config.as_mixed_conf_mut().0.bssid == Some(bssid.0)
+    let mut config = controller.configuration().unwrap();
+    if config.as_client_conf_ref().unwrap().bssid == Some(bssid.0)
         && matches!(controller.is_connected(), Ok(true))
     {
         log::warn!(
             "try connect to {} but already connected",
-            MACAddress(config.as_mixed_conf_mut().0.bssid.unwrap())
+            MACAddress(config.as_client_conf_ref().unwrap().bssid.unwrap())
         );
         return Ok(());
     }
@@ -172,13 +174,13 @@ async fn connect_to_other_node(
     config.as_mixed_conf_mut().0.bssid = Some(bssid.0);
     controller.set_configuration(&config).unwrap();
 
-    futures_lite::future::poll_once(controller.disconnect())
+    futures_lite::future::poll_once(controller.disconnect_async())
         .await
         .unwrap_or_log("disconnect unfinished");
 
     let mut res = Ok(());
     for _ in 0..retries {
-        res = controller.connect().await;
+        res = controller.connect_async().await;
         if res.is_ok() {
             break;
         }
@@ -211,52 +213,21 @@ async fn connection(
     };
     let config = Configuration::Mixed(sta_conf, ap_conf);
     controller.set_configuration(&config).unwrap();
-    controller.start().await.unwrap();
+    controller.start_async().await.unwrap();
     log::info!("Started WIFI");
 
     let mut sniffer = controller.take_sniffer().expect("take sniffer once");
     sniffer.set_promiscuous_mode(true).unwrap();
-    let controller_commands = make_static!(
-        Channel::<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            mesh_algo::ControllerCommand,
-            10,
-        >,
-        Channel::new()
+
+    let controller = make_static!(
+        mesh_algo::AsyncMutex<WifiController<'static>>,
+        mesh_algo::AsyncMutex::new(controller)
     );
-    let sta_disconnect = make_static!(
-        PubSubChannel::<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            (Instant, MACAddress),
-            4,
-            1,
-            1,
-        >,
-        PubSubChannel::new()
-    );
-    let ap_sta_connect = make_static!(
-        PubSubChannel::<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            (Instant, MACAddress, mesh_algo::ConnectionChange),
-            4,
-            1,
-            1,
-        >,
-        PubSubChannel::new()
-    );
-    // Spawn task that handles all `controller` actions.
-    spawn.must_spawn(controller_task(
-        config,
-        controller,
-        controller_commands.receiver(),
-        sta_disconnect.dyn_publisher().unwrap(),
-        ap_sta_connect.dyn_publisher().unwrap(),
-    ));
-    // Spawn handler before setting callback to avoid pile-up from callback before spawning handler.
-    spawn.must_spawn(mesh_algo::connect_to_next_parent(
-        controller_commands.sender(),
-        sta_disconnect.dyn_subscriber().unwrap(),
-    ));
+
+    // Connect to identified parents if not root.
+    if consts::TREE_LEVEL != Some(0) {
+        spawn.must_spawn(mesh_algo::connect_to_next_parent(controller));
+    }
     sniffer.set_receive_cb(sniffer_callback);
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
 }
@@ -280,7 +251,10 @@ async fn feed_wdt() -> ! {
     wdt.set_interrupt_handler(print_backtrace);
     wdt.enable();
     // Note: This doesn't seem to do anything when less than 380000us
-    wdt.set_timeout(esp_hal::delay::MicrosDurationU64::secs(5));
+    wdt.set_timeout(
+        esp_hal::timer::timg::MwdtStage::Stage0,
+        esp_hal::delay::MicrosDurationU64::secs(5),
+    );
     loop {
         wdt.feed();
         // 1 second leeway on watchdog timeout.
@@ -298,7 +272,6 @@ async fn main(spawn: embassy_executor::Spawner) {
     // Setup and configuration.
     let peripherals = esp_hal::init(esp_hal::Config::default());
     let timer = TimerGroup::new(peripherals.TIMG0);
-    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     esp_println::logger::init_logger_from_env();
     esp_hal_embassy::init(timer.timer0);
     let mut rng = Rng::new(peripherals.RNG);
@@ -317,16 +290,13 @@ async fn main(spawn: embassy_executor::Spawner) {
     }
 
     // Setup wifi.
-    let init = esp_wifi::init(
-        esp_wifi::EspWifiInitFor::Wifi,
-        timer.timer1,
-        rng,
-        peripherals.RADIO_CLK,
-    )
-    .unwrap();
+    let init = make_static!(
+        EspWifiController<'static>,
+        esp_wifi::init(timer.timer1, rng, peripherals.RADIO_CLK).unwrap()
+    );
     let wifi = peripherals.WIFI;
     let (wifi_ap_interface, wifi_sta_interface, controller) =
-        esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
+        esp_wifi::wifi::new_ap_sta(&*init, wifi).unwrap();
     let ap_mac = MACAddress(wifi_ap_interface.mac_address());
     // let sta_mac = wifi_sta_interface.mac_address();
     let (ap_stack, ap_runner) = embassy_net::new(
@@ -356,7 +326,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     spawn.must_spawn(ap_task(ap_runner));
     spawn.must_spawn(sta_task(sta_runner));
     spawn.must_spawn(connection(spawn, controller, ap_mac));
-    spawn.must_spawn(boot_button_reply(io.pins.gpio0));
+    spawn.must_spawn(boot_button_reply(peripherals.GPIO0));
 
     // Wait for AP stack to finish startup.
     ap_stack

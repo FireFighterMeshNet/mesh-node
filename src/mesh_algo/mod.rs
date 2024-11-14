@@ -6,13 +6,9 @@ mod packet;
 
 pub use packet::{Packet, PacketHeader};
 
-use crate::{
-    connect_to_other_node, consts,
-    util::{SelectEither, UnwrapExt},
-};
-use core::{cell::RefCell, future::Future, marker::PhantomData};
+use crate::{connect_to_other_node, consts, util::UnwrapExt};
+use core::{cell::RefCell, marker::PhantomData};
 use critical_section::Mutex;
-use either::Either;
 use embassy_net::{
     tcp::{TcpReader, TcpSocket},
     IpEndpoint, IpListenEndpoint,
@@ -20,12 +16,11 @@ use embassy_net::{
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender},
-    pubsub::{DynPublisher, DynSubscriber},
-    signal::Signal,
+    signal::Signal as SignalRaw,
 };
-use embassy_time::{Duration, Instant, TimeoutError, Timer, WithTimeout};
+use embassy_time::{Duration, Timer, WithTimeout};
 use embedded_io_async::{Read, Write};
-use esp_wifi::wifi::{Configuration, PromiscuousPkt, Sniffer, StaList, WifiController, WifiEvent};
+use esp_wifi::wifi::{self, event::EventExt, PromiscuousPkt, Sniffer, WifiController};
 use heapless::FnvIndexMap;
 use ieee80211::{
     common::CapabilitiesInformation,
@@ -36,7 +31,6 @@ use ieee80211::{
 };
 use node_data::{NodeData, NodeDataBeaconMsg, NodeTable};
 use scroll::{ctx::SizeWith, Pread, Pwrite};
-use stack_dst::Value;
 
 error_set::error_set! {
     SendToParentErr = {
@@ -75,6 +69,8 @@ pub type Level = u8;
 pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
+pub type AsyncMutex<T> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, T>;
+pub type Signal<T> = SignalRaw<CriticalSectionRawMutex, T>;
 
 /// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone)]
@@ -303,7 +299,7 @@ static STATE: Mutex<RefCell<NodeTable>> = Mutex::new(RefCell::new(NodeTable {
 
 /// [`MACAddress`] for next parent node to connect to.
 /// Stored in a static because the sniffer callback is unfortunately a `fn` not a `Fn` and can't store runtime state.
-static NEXT_PARENT: Signal<CriticalSectionRawMutex, MACAddress> = Signal::new();
+static NEXT_PARENT: Signal<MACAddress> = Signal::new();
 
 /// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
 pub fn sniffer_callback(pkt: &PromiscuousPkt) {
@@ -438,227 +434,66 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> !
     }
 }
 
-// Max size in units of `u64` for the values of [`ControllerMsg`]
-// 1 usize goes to the metadata and the rest is for the actual size.
-const DYN_FIXED_SIZE: usize = 37;
-/// Commands/Messages (like in the actor model) for the controller
-pub struct ControllerCommand(
-    // Can't make this `FnOnce` without nightly since it would have to move out the dyn FnOnce to call.
-    // `std::Box` is special and gets to do this but 3rd party types like `Value` here don't.
-    // Read as "A closure with a maximum size which returns a future a maximum size"
-    pub  Value<
-        dyn for<'a> FnMut(
-            &'a mut esp_wifi::wifi::Configuration,
-            &'a mut WifiController<'static>,
-        ) -> Value<
-            dyn Future<Output = ()> + 'a,
-            stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>,
-        >,
-        stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>,
-    >,
-);
-/// Create a new command for the controller to execute.
-/// Works by taking a fixed size closure that returns a fixed size future and polling the result to completion.
-/// # Panics
-/// If this panics the future or closure is too large. Either increase [`DYN_FIXED_SIZE`] or make the future/closure smaller.
-/// # Example
-/// Use like
-/// ```ignore
-/// controller_msg!(config, controller, { log::info!("{:?}{:?}", controller.get_capabilities(), config.as_ap_conf_ref()) })
-/// ```
-macro_rules! controller_command {
-    ($config:ident, $controller:ident, $e:expr) => {
-        ControllerCommand(
-            Value::new(
-                for<'a> move |$config: &'a mut Configuration,
-                              $controller: &'a mut WifiController<'static>|
-                              -> Value<dyn Future<Output = ()> + 'a, stack_dst::buffers::ConstArrayBuf<u64, DYN_FIXED_SIZE>> {
-                        Value::new(async move { $e })
-                    .unwrap_or_else(|e| panic!("future: {} >= {}", size_of_val(&e), size_of::<u64>() * DYN_FIXED_SIZE))
-                },
-            )
-            .unwrap_or_else(|e| panic!("closure: {} >= {}", size_of_val(&e), size_of::<u64>() * DYN_FIXED_SIZE))
-        )
-    };
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ConnectionChange {
-    Connect,
-    Disconnect,
-}
-/// `controller` has to be managed exclusively by this task so events and actions be simultaneously awaited. See "actor model".
-/// Can send commands for what to do next from many other tasks using the channel for `rx`.
+/// Connects to new parent nodes if a better one is found.
 #[embassy_executor::task]
-pub async fn controller_task(
-    mut config: Configuration,
-    mut controller: WifiController<'static>,
-    rx: Receiver<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
-    sta_disconnected_tx: DynPublisher<'static, (Instant, MACAddress)>,
-    ap_sta_connected_tx: DynPublisher<'static, (Instant, MACAddress, ConnectionChange)>,
-) -> ! {
-    let mut prev_connected = StaList::default();
+pub async fn connect_to_next_parent(controller: &'static AsyncMutex<WifiController<'static>>) -> ! {
+    // Make sure to update state on disconnects.
+    wifi::event::StaDisconnected::update_handler(|cs, event| {
+        STATE.borrow_ref_mut(cs).mark_me_disconnected();
+        log::warn!("STA disconnected: {}", MACAddress(event.0.bssid));
+    });
+
+    // Keep connecting to `NEXT_PARENT` whenever a new one is identified.
     loop {
-        // Wait for an event from the controller or a message to do something with the controller.
-        let res = rx
-            .receive()
-            .select(controller.wait_for_events(
-                WifiEvent::StaDisconnected
-                    | WifiEvent::ApStaconnected
-                    | WifiEvent::ApStadisconnected,
-                false,
-            ))
+        let next_parent = NEXT_PARENT.wait().await;
+        log::info!("connecting: mac={next_parent}");
+
+        let res = connect_to_other_node(&mut *controller.lock().await, next_parent, 1)
+            .with_timeout(Duration::from_secs(60))
             .await;
 
         match res {
-            Either::Left(mut cmd) => cmd.0(&mut config, &mut controller).await,
-            Either::Right(event) => {
-                if event.contains(WifiEvent::StaDisconnected) {
-                    sta_disconnected_tx.publish_immediate((
-                        Instant::now(),
-                        MACAddress(
-                            controller
-                                .get_configuration()
-                                .unwrap()
-                                .as_client_conf_ref()
-                                .unwrap()
-                                .bssid
-                                .expect("connected to a bssid"),
-                        ),
-                    ));
-                }
-                if event.contains(WifiEvent::ApStaconnected) {
-                    let list = esp_wifi::wifi::StaList::get_sta_list().unwrap();
-                    let instant = Instant::now();
-                    for sta in list.0.iter().filter(|sta| !prev_connected.0.contains(sta)) {
-                        ap_sta_connected_tx.publish_immediate((
-                            instant,
-                            sta.0.mac.into(),
-                            ConnectionChange::Connect,
-                        ));
-                    }
-                    prev_connected = list;
-                }
-                if event.contains(WifiEvent::ApStadisconnected) {
-                    let list = esp_wifi::wifi::StaList::get_sta_list().unwrap();
-                    let instant = Instant::now();
-                    for sta in prev_connected.0.iter().filter(|sta| !list.0.contains(sta)) {
-                        ap_sta_connected_tx.publish_immediate((
-                            instant,
-                            sta.0.mac.into(),
-                            ConnectionChange::Disconnect,
-                        ));
-                    }
-                    prev_connected = list;
-                }
-                // TODO other events.
-            }
-        }
-    }
-}
+            Ok(Ok(())) => {
+                let parent_level = critical_section::with(|cs| {
+                    let table = &mut *STATE.borrow_ref_mut(cs);
 
-/// Connects to new parent nodes if a better one is found. Doesn't do anything if this node is root.
-#[embassy_executor::task]
-pub async fn connect_to_next_parent(
-    // Send new commands to controller task
-    controller_tx: Sender<'static, CriticalSectionRawMutex, ControllerCommand, 10>,
-    // Publisher for new sta_disconnected events.
-    mut sta_disconnected_rx: DynSubscriber<'static, (Instant, MACAddress)>,
-) {
-    // Don't run if root.
-    if consts::TREE_LEVEL == Some(0) {
-        return;
-    }
+                    // Set new parent now that connected.
+                    table.parent = Some(next_parent);
+                    // The new parent can be reached by going up (to the parent).
+                    // The old parent is probably still connected, and isn't below this node so it stays `Up` until further notice.
+                    table.map[&next_parent].postion = TreePos::Up;
 
-    // Last time connected to parent.
-    let mut last_connected = Instant::now();
-    loop {
-        match NEXT_PARENT
-            .wait()
-            .select(async {
-                // Handle disconnects in this function so we only mark ourselves as disconnected when not connected or trying to connect.
-                loop {
-                    let disconnect_event = sta_disconnected_rx.next_message_pure().await;
-                    // Only care about the event if disconnected since last connect.
-                    if disconnect_event
-                        .0
-                        .checked_duration_since(last_connected)
-                        .is_some()
-                    {
-                        break;
-                    };
-                }
-            })
-            .await
-        {
-            Either::Left(next_parent) => {
-                log::info!("connecting: mac={next_parent}");
-                /// Send/receive results from commands sent to controller task.
-                static ONESHOT: OneShotChannel<
-                    Result<Result<Instant, esp_wifi::wifi::WifiError>, TimeoutError>,
-                > = OneShotChannel::new();
-                let command = controller_command!(config, controller, {
-                    // Either fail to connect or return when connection succeeded
-                    let connection_result =
-                        connect_to_other_node(config, controller, next_parent, 1)
-                            .with_timeout(Duration::from_secs(60))
-                            .await
-                            .map(|x| x.map(|_| Instant::now()));
-                    ONESHOT.send(connection_result).await;
+                    // Unset pending now that it is set.
+                    // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
+                    table.pending_parent = None;
+
+                    table.map[&next_parent].level
                 });
-                controller_tx.send(command).await;
-                let res = ONESHOT.receive().await;
-
-                match res {
-                    Ok(Ok(instant)) => {
-                        last_connected = instant;
-
-                        let parent_level = critical_section::with(|cs| {
-                            let table = &mut *STATE.borrow_ref_mut(cs);
-
-                            // Set new parent now that connected.
-                            table.parent = Some(next_parent);
-                            // The new parent can be reached by going up (to the parent).
-                            // The old parent is probably still connected, and isn't below this node so it stays `Up` until further notice.
-                            table.map[&next_parent].postion = TreePos::Up;
-
-                            // Unset pending now that it is set.
-                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
-                            table.pending_parent = None;
-
-                            table.map[&next_parent].level
-                        });
-                        if res.is_ok() {
-                            log::info!("connected: mac={next_parent}; level={parent_level}")
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        critical_section::with(|cs| {
-                            let table = &mut *STATE.borrow_ref_mut(cs);
-
-                            table.mark_me_disconnected();
-                            // Even on connection fail clear the pending parent so search can find new parent.
-                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
-                            table.pending_parent = None;
-                        });
-                        log::warn!("failed connect: mac={next_parent}: {e:?}")
-                    }
-                    Err(e) => {
-                        critical_section::with(|cs| {
-                            let table = &mut *STATE.borrow_ref_mut(cs);
-
-                            table.mark_me_disconnected();
-                            // Even on connection fail clear the pending parent so search can find new parent.
-                            // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
-                            table.pending_parent = None;
-                        });
-                        log::warn!("failed connect: mac={next_parent}: {e:?}")
-                    }
+                if res.is_ok() {
+                    log::info!("connected: mac={next_parent}; level={parent_level}")
                 }
             }
-            Either::Right(_) => {
-                critical_section::with(|cs| STATE.borrow_ref_mut(cs).mark_me_disconnected());
-                log::warn!("STA disconnected");
+            Ok(Err(e)) => {
+                critical_section::with(|cs| {
+                    let table = &mut *STATE.borrow_ref_mut(cs);
+
+                    table.mark_me_disconnected();
+                    // Even on connection fail clear the pending parent so search can find new parent.
+                    // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
+                    table.pending_parent = None;
+                });
+                log::warn!("failed connect: mac={next_parent}: {e:?}")
+            }
+            Err(e) => {
+                critical_section::with(|cs| {
+                    let table = &mut *STATE.borrow_ref_mut(cs);
+
+                    table.mark_me_disconnected();
+                    // Even on connection fail clear the pending parent so search can find new parent.
+                    // TODO(perf): If optimization where a new pending parent is picked even while connecting, then this can't be unconditional set `None`.
+                    table.pending_parent = None;
+                });
+                log::warn!("failed connect: mac={next_parent}: {e:?}")
             }
         }
     }
