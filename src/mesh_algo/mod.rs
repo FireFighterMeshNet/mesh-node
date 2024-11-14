@@ -174,18 +174,28 @@ async fn next_hop_socket<'a>(
     // TODO: broadcast address should broadcast to all children and parent.
 
     // Resolve next-hop.
-    let Some(dest) = critical_section::with(|cs| {
-        STATE
-            .borrow_ref_mut(cs)
+    let pos = critical_section::with(|cs| {
+        let table = &mut *STATE.borrow_ref_mut(cs);
+        if let Some(dest) = table
             .map
             .iter()
             .find(|x| *x.0 == address)
-            .map(|x| (x.0.clone(), x.1.clone()))
-    }) else {
-        todo!("forward mac {address} dest missing");
-    };
+            .map(|x| x.1.clone())
+        {
+            return dest.postion;
+        }
+
+        // If the addressed node isn't known to this node, hopefully a higher node does know it.
+        if table.parent.is_none() {
+            // Make this a nop after overlay device is written because then dropping invalid messages is fine
+            // as they'll be re-sent by overlay tcp.
+            todo!("forward mac {address} dest missing");
+        } else {
+            TreePos::Up
+        }
+    });
     // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
-    let (ip, tx_socket) = match dest.1.postion {
+    let (ip, tx_socket) = match pos {
         TreePos::Up => (consts::AP_CIDR.address().into_address(), sta_tx_socket),
         TreePos::Down(child_mac) => (
             consts::sta_cidr_from_mac(child_mac)
