@@ -111,17 +111,13 @@ async fn boot_button_reply(gpio0: GpioPin<0>) -> ! {
 
 /// Run the AP network stack so the WifiAP responds to network events.
 #[embassy_executor::task]
-async fn ap_task(
-    mut runner: Runner<'static, mesh_algo::device::MeshDevice<WifiDevice<'static, WifiApDevice>>>,
-) -> ! {
+async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) -> ! {
     runner.run().await
 }
 
 /// Run the STA network stack so the WifiSta responds to network events.
 #[embassy_executor::task]
-async fn sta_task(
-    mut runner: Runner<'static, mesh_algo::device::MeshDevice<WifiDevice<'static, WifiStaDevice>>>,
-) -> ! {
+async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) -> ! {
     runner.run().await
 }
 
@@ -304,7 +300,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     let ap_mac = MACAddress(wifi_ap_interface.mac_address());
     // let sta_mac = wifi_sta_interface.mac_address();
     let (ap_stack, ap_runner) = embassy_net::new(
-        mesh_algo::device::MeshDevice::new(wifi_ap_interface),
+        wifi_ap_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: consts::AP_CIDR,
             gateway: Some(consts::AP_CIDR.address()),
@@ -317,7 +313,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         prng.gen(),
     );
     let (sta_stack, sta_runner) = embassy_net::new(
-        mesh_algo::device::MeshDevice::new(wifi_sta_interface),
+        wifi_sta_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: consts::sta_cidr_from_mac(ap_mac),
             gateway: Some(consts::AP_CIDR.address()),

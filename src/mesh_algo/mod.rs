@@ -249,7 +249,7 @@ pub async fn forward<E>(
                 }
             }
         }
-        let header = buf.pread::<PacketHeader>(0).todo();
+        let header = buf.pread::<PacketHeader>(0).unwrap();
         let mut bytes_left = header.len();
         let to_me = header.destination() == ap_mac;
         // Forward header and choose correct socket if the data is not for this node.
