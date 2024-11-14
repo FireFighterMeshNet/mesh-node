@@ -1,5 +1,6 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
 
+pub mod device;
 mod macros;
 mod node_data;
 mod packet;
@@ -219,8 +220,15 @@ pub async fn forward<E>(
     sta_tx_socket: &mut TcpSocket<'static>,
     mut tx_me: impl async FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
+    // Make sure if `Packet`'s length type is not `u8` this doesn't overflow flash.
+    const MAX_SIZE: usize = 1024;
+    // buffer can be `Packet::max_size()` or smaller, but no need for bigger
     let mut buf = [0u8; {
-        Packet::max_size() // or smaller, but no need for bigger
+        if Packet::max_size() < MAX_SIZE {
+            Packet::max_size()
+        } else {
+            MAX_SIZE
+        }
     }];
 
     'packet: loop {
@@ -269,7 +277,7 @@ pub async fn forward<E>(
                 // TODO: Disconnect while expecting more data. This will result in lost data.
                 // At the very least, should probably send `bytes_left` filler to resync the forwarded data.
                 // Better would be to use framing (e.g. COBS).
-                e @ Err(_) => e.todo_msg("missing rest of data"),
+                e @ Err(_) => e.todo_msg("incomplete packet: data missing"),
             };
             match &mut tx_socket {
                 // Send data to next-hop.
