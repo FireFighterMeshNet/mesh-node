@@ -102,7 +102,17 @@ impl<T: AsRef<[u8]>> Packet<T> {
         self.header.set_destination(destination);
     }
 
-    pub async fn send(&self, socket: &mut TcpSocket<'_>) -> Result<(), PacketSendErr> {
+    pub async fn send<'a>(
+        &self,
+        ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+        sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+    ) -> Result<(), PacketSendErr> {
+        let dest = self.header.destination();
+
+        let socket = next_hop_socket(dest, ap_tx_socket, sta_tx_socket)
+            .await
+            .ok_or(PacketSendErr::NextHopMissing)?;
+
         socket
             .write_all(self.header.as_bytes())
             .await

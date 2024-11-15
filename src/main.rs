@@ -8,7 +8,7 @@
 // extern crate alloc;
 
 use core::{sync::atomic::AtomicU8, u8};
-use embassy_net::{tcp::TcpSocket, IpEndpoint, Runner, StackResources, StaticConfigV6};
+use embassy_net::{tcp::TcpSocket, Runner, StackResources, StaticConfigV6};
 use embassy_time::{Duration, Timer, WithTimeout};
 use esp_backtrace as _;
 use esp_hal::{
@@ -343,7 +343,10 @@ async fn main(spawn: embassy_executor::Spawner) {
             gateway: Some(consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
-        make_static!(StackResources::<3>, StackResources::<3>::new()),
+        make_static!(
+            StackResources::<{ consts::MAX_NODES * 2 }>,
+            StackResources::<{ consts::MAX_NODES * 2 }>::new()
+        ),
         prng.gen(),
     );
 
@@ -399,9 +402,18 @@ async fn main(spawn: embassy_executor::Spawner) {
     }
     forward_socket!(ap_stack);
     forward_socket!(ap_stack);
+    forward_socket!(sta_stack);
 
-    if consts::TREE_LEVEL != Some(0) {
-        let sta_socket = make_static!(
+    {
+        let ap_rx_socket = make_static!(
+            TcpSocket<'static>,
+            TcpSocket::new(
+                ap_stack,
+                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+                make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+            )
+        );
+        let sta_tx_socket = make_static!(
             TcpSocket<'static>,
             TcpSocket::new(
                 sta_stack,
@@ -409,32 +421,69 @@ async fn main(spawn: embassy_executor::Spawner) {
                 make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
             )
         );
-        sta_socket.set_timeout(Some(Duration::from_secs(10)));
 
+        ap_rx_socket.set_timeout(Some(Duration::from_secs(10)));
+        sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
+        spawn.must_spawn(mesh_algo::propagate_neighbors(ap_rx_socket, sta_tx_socket));
+    }
+
+    let sta_socket = make_static!(
+        TcpSocket<'static>,
+        TcpSocket::new(
+            sta_stack,
+            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+        )
+    );
+    sta_socket.set_timeout(Some(Duration::from_secs(10)));
+    let ap_socket = make_static!(
+        TcpSocket<'static>,
+        TcpSocket::new(
+            ap_stack,
+            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+        )
+    );
+    ap_socket.set_timeout(Some(Duration::from_secs(10)));
+
+    if consts::TREE_LEVEL != Some(0) {
         // DEBUG: connect to the ap and send a packet to a mac.
         #[embassy_executor::task]
-        async fn f(mut socket: &'static mut TcpSocket<'static>) {
-            if let e @ Err(_) = socket
-                .connect(IpEndpoint::new(
-                    consts::AP_CIDR.address().into(),
-                    consts::PORT,
-                ))
-                .await
-            {
-                err!(e);
-                return;
-            }
-
+        async fn f(
+            ap_socket: &'static mut TcpSocket<'static>,
+            sta_socket: &'static mut TcpSocket<'static>,
+        ) {
             for _ in 0..10 {
                 let pkt = Packet::new(consts::ROOT_MAC, b"hello world 123").unwrap();
 
                 log::info!("send");
-                if let e @ Err(_) = pkt.send(&mut socket).await {
+                if let e @ Err(_) = pkt.send(&mut *ap_socket, &mut *sta_socket).await {
                     err!(e);
                 };
             }
-            mesh_algo::socket_force_closed(socket).await;
+            mesh_algo::socket_force_closed(ap_socket).await;
+            mesh_algo::socket_force_closed(sta_socket).await;
         }
-        spawn.must_spawn(f(sta_socket));
+        spawn.must_spawn(f(ap_socket, sta_socket));
+    } else {
+        #[embassy_executor::task]
+        async fn f(ap_socket: &'static mut TcpSocket<'static>) {
+            Timer::after_secs(10).await;
+            for _ in 0..10 {
+                let pkt = Packet::new(
+                    MACAddress([0xc6, 0xdd, 0x57, 0x75, 0xb3, 0x60]),
+                    b"hello world 123",
+                )
+                .unwrap();
+
+                log::info!("send");
+                if let e @ Err(_) = pkt.send(&mut *ap_socket, None).await {
+                    err!(e);
+                };
+            }
+            mesh_algo::socket_force_closed(ap_socket).await;
+        }
+
+        spawn.must_spawn(f(ap_socket));
     }
 }

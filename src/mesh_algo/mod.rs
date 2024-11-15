@@ -47,6 +47,8 @@ error_set::error_set! {
         Tcp {
             source: embassy_net::tcp::Error
         },
+        /// The selected next hop isn't available.
+        NextHopMissing
         // #[display("{source:?}")]
         // ScrollErr {
         //     source: scroll::Error,
@@ -74,7 +76,7 @@ pub type AsyncMutex<T> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, T>;
 pub type Signal<T> = SignalRaw<CriticalSectionRawMutex, T>;
 
 /// Relative position in the mesh tree.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum TreePos {
     /// Have to go up the tree to reach the node.
     Up,
@@ -88,14 +90,15 @@ pub enum TreePos {
 /// Send the given data, which fits in one packet, to the current parent.
 pub async fn send_to_parent(
     data: &[u8],
-    socket: &mut TcpSocket<'_>,
+    ap_tx_socket: &mut TcpSocket<'static>,
+    sta_tx_socket: &mut TcpSocket<'static>,
 ) -> Result<(), SendToParentErr> {
     let pkt = Packet::new(
         critical_section::with(|cs| STATE.borrow_ref_mut(cs).parent)
             .ok_or(SendToParentErr::NoParent)?,
         data,
     )?;
-    pkt.send(socket).await?;
+    pkt.send(ap_tx_socket, sta_tx_socket).await?;
     Ok(())
 }
 
@@ -144,7 +147,7 @@ pub async fn accept_sta_and_forward(
             sta_tx_socket,
             async |bytes| {
                 // TODO receive data for this node.
-                esp_println::dbg!(bytes);
+                log::info!("[{}:{}] bytes = {:?}", file!(), line!(), bytes);
                 Ok(())
             },
         )
@@ -166,11 +169,15 @@ pub async fn socket_force_closed(socket: &mut TcpSocket<'_>) {
 
 /// Connects using either ap (to child) or sta (to parent) interface to the node on the way to the given mac.
 /// Disconnects from previous if needed to connect to new.
+/// # Return
+/// If the selected socket was input as `None` the output will be `None`.
 async fn next_hop_socket<'a>(
     address: MACAddress,
-    ap_tx_socket: &'a mut TcpSocket<'static>,
-    sta_tx_socket: &'a mut TcpSocket<'static>,
-) -> &'a mut TcpSocket<'static> {
+    ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+    sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+) -> Option<&'a mut TcpSocket<'static>> {
+    let ap_tx_socket: Option<&mut TcpSocket<'static>> = ap_tx_socket.into();
+    let sta_tx_socket: Option<&mut TcpSocket<'static>> = sta_tx_socket.into();
     // TODO: broadcast address should broadcast to all children and parent.
 
     // Resolve next-hop.
@@ -179,32 +186,31 @@ async fn next_hop_socket<'a>(
         if let Some(dest) = table
             .map
             .iter()
-            .find(|x| *x.0 == address)
+            .find(|x| esp_println::dbg!(*x.0) == esp_println::dbg!(address))
             .map(|x| x.1.clone())
         {
-            return dest.postion;
+            return esp_println::dbg!(dest.postion);
         }
 
         // If the addressed node isn't known to this node, hopefully a higher node does know it.
         if table.parent.is_none() {
-            // Make this a nop after overlay device is written because then dropping invalid messages is fine
-            // as they'll be re-sent by overlay tcp.
-            todo!("forward mac {address} dest missing");
-        } else {
-            TreePos::Up
+            log::warn!("next-hop mac {address} missing and no parent");
         }
+        TreePos::Disconnected
     });
     // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
     let (ip, tx_socket) = match pos {
-        TreePos::Up => (consts::AP_CIDR.address().into_address(), sta_tx_socket),
+        TreePos::Up | TreePos::Disconnected => {
+            (consts::AP_CIDR.address().into_address(), sta_tx_socket)
+        }
         TreePos::Down(child_mac) => (
             consts::sta_cidr_from_mac(child_mac)
                 .address()
                 .into_address(),
             ap_tx_socket,
         ),
-        TreePos::Disconnected => todo!("forward to an inaccessible node"),
     };
+    let tx_socket = tx_socket?;
 
     // Connect to next-hop if not already connected.
     if tx_socket.remote_endpoint() != Some(IpEndpoint::new(ip, consts::DATA_PORT)) {
@@ -220,7 +226,7 @@ async fn next_hop_socket<'a>(
             "connect to next hop"
         );
     }
-    tx_socket
+    Some(tx_socket)
 }
 
 /// Forward all [`Packet`]s received from `rx` to `tx_other` or `tx_me` based on destination.
@@ -269,8 +275,13 @@ pub async fn forward<E>(
             None
         } else {
             // Connect to next hop socket and disconnect from previous if needed.
-            let tx_socket =
-                next_hop_socket(header.destination(), ap_tx_socket, sta_tx_socket).await;
+            let tx_socket = next_hop_socket(
+                header.destination(),
+                &mut *ap_tx_socket,
+                &mut *sta_tx_socket,
+            )
+            .await
+            .unwrap();
             // Send data to next-hop.
             err!(
                 tx_socket
@@ -492,6 +503,7 @@ pub async fn connect_to_next_parent(controller: &'static AsyncMutex<WifiControll
                 if res.is_ok() {
                     log::info!("connected: mac={next_parent}; level={parent_level}")
                 }
+                // TODO: send neighbor table to parent.
             }
             Ok(Err(e)) => {
                 critical_section::with(|cs| {
