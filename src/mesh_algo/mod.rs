@@ -207,14 +207,16 @@ async fn next_hop_socket<'a>(
     };
 
     // Connect to next-hop if not already connected.
-    if tx_socket.remote_endpoint() != Some(IpEndpoint::new(ip, consts::PORT)) {
+    if tx_socket.remote_endpoint() != Some(IpEndpoint::new(ip, consts::DATA_PORT)) {
         // Disconnect old.
         if tx_socket.remote_endpoint().is_some() {
             socket_force_closed(tx_socket).await;
         }
         // Connect new.
         err!(
-            tx_socket.connect(IpEndpoint::new(ip, consts::PORT)).await,
+            tx_socket
+                .connect(IpEndpoint::new(ip, consts::DATA_PORT))
+                .await,
             "connect to next hop"
         );
     }

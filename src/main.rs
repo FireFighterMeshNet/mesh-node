@@ -62,7 +62,7 @@ mod consts {
     pub const IP_PREFIX_LEN: u8 = 48;
 
     /// CIDR used for gateway (AP).
-    /// `fc00` prefix is dedicated to private networks.
+    // The `fc00` prefix used here is dedicated to private networks by the spec.
     pub const AP_CIDR: Ipv6Cidr =
         Ipv6Cidr::new(Ipv6Address::new(0xfc00, 0, 0, 0, 0, 0, 0, 1), IP_PREFIX_LEN);
 
@@ -76,20 +76,23 @@ mod consts {
     }
 
     /// `MACAddress` from `Ipv6Cidr` by extracting the embedded mac.
-    pub const fn mac_from_sta_cidr(ip: Ipv6Cidr) -> MACAddress {
-        let address = ip.address().0;
+    pub const fn mac_from_sta_addr(ip: Ipv6Address) -> MACAddress {
+        let address = ip.0;
         MACAddress([
-            address[address.len() - 6],
-            address[address.len() - 5],
-            address[address.len() - 4],
-            address[address.len() - 3],
-            address[address.len() - 2],
             address[address.len() - 1],
+            address[address.len() - 2],
+            address[address.len() - 3],
+            address[address.len() - 4],
+            address[address.len() - 5],
+            address[address.len() - 6],
         ])
     }
 
-    /// Port used
-    pub const PORT: u16 = 8000;
+    /// Port used for forwarding data.
+    pub const DATA_PORT: u16 = 8000;
+
+    /// Port used for mesh control messages.
+    pub const CONTROL_PORT: u16 = 8001;
 
     // `MACAddress` of the root node
     // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
@@ -232,6 +235,23 @@ async fn connection(
     spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
 }
 
+/// Convert from the default sta mac to ap mac.
+///
+/// See [`esp_hal::efuse::Efuse::mac_address()`], [`esp_wifi::wifi::ap_mac`], [`esp_wifi::wifi::sta_mac`]
+// I don't know why the ap and sta macs are chosen the way they are but that makes the below work, so whatever.
+pub fn sta_mac_to_ap(mut mac: MACAddress) -> MACAddress {
+    mac.0[0] |= 2;
+    mac
+}
+/// Convert from the default ap mac to sta mac.
+///
+/// See [`esp_hal::efuse::Efuse::mac_address()`], [`esp_wifi::wifi::ap_mac`], [`esp_wifi::wifi::sta_mac`]
+// I don't know why the ap and sta macs are chosen the way they are, but that makes the below work, so whatever.
+pub fn ap_mac_to_sta(mut mac: MACAddress) -> MACAddress {
+    mac.0[0] &= u8::MAX ^ 2;
+    mac
+}
+
 #[handler]
 fn print_backtrace() {
     esp_println::println!("Watchdog backtrace:");
@@ -298,7 +318,11 @@ async fn main(spawn: embassy_executor::Spawner) {
     let (wifi_ap_interface, wifi_sta_interface, controller) =
         esp_wifi::wifi::new_ap_sta(&*init, wifi).unwrap();
     let ap_mac = MACAddress(wifi_ap_interface.mac_address());
-    // let sta_mac = wifi_sta_interface.mac_address();
+    let sta_mac = MACAddress(wifi_sta_interface.mac_address());
+    log::info!("ap_mac: {}; sta_mac: {}", ap_mac, sta_mac);
+    assert_eq!(ap_mac_to_sta(ap_mac), sta_mac);
+    assert_eq!(sta_mac_to_ap(sta_mac), ap_mac);
+
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {

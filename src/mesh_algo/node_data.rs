@@ -18,6 +18,8 @@ impl NodeData {
         }
     }
     /// Create a new [`NodeData`] from the first msg received from a node.
+    /// # Errors
+    /// If protocol version doesn't match.
     pub fn from_first_msg(msg: NodeDataBeaconMsg) -> Result<Self, InvalidMsg> {
         if msg.version != consts::PROT_VERSION {
             return Err(InvalidMsg::Version {
@@ -31,6 +33,8 @@ impl NodeData {
         })
     }
     /// Update an existing [`NodeData`] with a more recent [`NodeDataBeaconMsg`]
+    /// # Errors
+    /// If protocol version doesn't match.
     pub fn update_with_msg(&mut self, msg: NodeDataBeaconMsg) -> Result<(), InvalidMsg> {
         if msg.version != consts::PROT_VERSION {
             return Err(InvalidMsg::Version {
