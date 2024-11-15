@@ -4,8 +4,11 @@ pub mod device;
 mod macros;
 mod node_data;
 mod packet;
+mod propagate_neighbors;
 
 pub use packet::{Packet, PacketHeader};
+#[allow(unused_imports)]
+pub use propagate_neighbors::{propagate_neighbors, PropagateNeighborMsg};
 
 use crate::{connect_to_other_node, consts, util::UnwrapExt};
 use core::{cell::RefCell, marker::PhantomData};
@@ -16,7 +19,8 @@ use embassy_net::{
 };
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::{Channel, Receiver, Sender},
+    channel::{Channel as ChannelRaw, Receiver, Sender},
+    pubsub::PubSubChannel as PubSubChannelRaw,
     signal::Signal as SignalRaw,
 };
 use embassy_time::{Duration, Timer, WithTimeout};
@@ -69,11 +73,14 @@ error_set::error_set! {
 pub type Version = u8;
 pub type Level = u8;
 
+pub type Channel<T, const N: usize> = ChannelRaw<CriticalSectionRawMutex, T, N>;
 pub type OneShotRx<T> = Receiver<'static, CriticalSectionRawMutex, T, 1>;
 pub type OneShotTx<T> = Sender<'static, CriticalSectionRawMutex, T, 1>;
-pub type OneShotChannel<T> = Channel<CriticalSectionRawMutex, T, 1>;
+pub type OneShotChannel<T> = Channel<T, 1>;
 pub type AsyncMutex<T> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, T>;
 pub type Signal<T> = SignalRaw<CriticalSectionRawMutex, T>;
+pub type PubSubChannel<T, const CAP: usize, const SUBS: usize, const PUBS: usize> =
+    PubSubChannelRaw<CriticalSectionRawMutex, T, CAP, SUBS, PUBS>;
 
 /// Relative position in the mesh tree.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
