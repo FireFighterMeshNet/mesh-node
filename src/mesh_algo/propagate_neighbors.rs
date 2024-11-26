@@ -99,6 +99,7 @@ async fn update_from_msg(msg: PropagateNeighborMsg, child: MACAddress) {
             heapless::Entry::Vacant(vacant_entry) => {
                 let mut new_node = NodeData::from_first_msg(NodeDataBeaconMsg {
                     version: consts::PROT_VERSION,
+                    // TODO this might be wrong if multiple hops away from child
                     level: child_level + 1,
                 })
                 .unwrap();
@@ -124,7 +125,7 @@ async fn update_from_msg(msg: PropagateNeighborMsg, child: MACAddress) {
 
 /// Drain requeued until the next message is out-of-order again.
 async fn drain_requeued() {
-    // Note: Don't lock `REQUEUED` and critical section at the same time to thinking about deadlocks.
+    // Note: Don't lock `REQUEUED` and critical section at the same time to avoid thinking about deadlocks.
     while let Ok((msg, child)) = REQUEUED.try_receive() {
         if critical_section::with(|cs| {
             message_out_of_order(&mut *STATE.borrow_ref_mut(cs), msg, child)
@@ -144,9 +145,9 @@ async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) {
     // Accept connection, handle neighbor changes, wait for client to disconnect.
     loop {
         err!(ap_rx_socket.accept(consts::CONTROL_PORT).await);
-        let Some(remote) = ap_rx_socket.remote_endpoint() else {
-            unreachable!("no remote after accept")
-        };
+        let remote = ap_rx_socket
+            .remote_endpoint()
+            .expect("should have remote after accept");
         ap_rx_socket.close(); // not going to write to child.
         err!(ap_rx_socket.flush().await);
         match ap_rx_socket.read_exact(&mut buf).await {
@@ -184,9 +185,9 @@ async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) 
         // Wait for updates.
         MAC_CHANGE_TO_TX.ready_to_receive().await;
 
-        // Don't connect to parent if there is none.
+        // Don't connect to parent if there is none, but empty queue of events.
         if critical_section::with(|cs| STATE.borrow_ref_mut(cs).parent.is_none()) {
-            MAC_CHANGE_TO_TX.try_receive().unwrap();
+            while let Ok(_) = MAC_CHANGE_TO_TX.try_receive() {}
             continue;
         }
 

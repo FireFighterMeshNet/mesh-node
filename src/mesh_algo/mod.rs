@@ -166,7 +166,7 @@ pub async fn accept_sta_and_forward(
     }
 }
 
-/// Close down socket forcefully.
+/// Close and flush, then abort socket.
 pub async fn socket_force_closed(socket: &mut TcpSocket<'_>) {
     socket.close();
     err!(socket.flush().await);
