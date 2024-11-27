@@ -18,7 +18,7 @@ pub const IP_PREFIX_LEN: u8 = 48;
 /// `Ipv6Cidr` from `MACAddress` by embedding the mac as the last 6 bytes of address.
 pub const fn sta_cidr_from_mac(mac: MACAddress) -> Ipv6Cidr {
     let mac_ip: [u8; 16] = [
-        0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac.0[5], mac.0[4], mac.0[3], mac.0[2], mac.0[1], mac.0[0],
+        0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
     ];
     Ipv6Cidr::new(Ipv6Address(mac_ip), IP_PREFIX_LEN)
 }
@@ -27,12 +27,12 @@ pub const fn sta_cidr_from_mac(mac: MACAddress) -> Ipv6Cidr {
 pub const fn mac_from_sta_addr(ip: Ipv6Address) -> MACAddress {
     let address = ip.0;
     MACAddress([
-        address[address.len() - 1],
-        address[address.len() - 2],
-        address[address.len() - 3],
-        address[address.len() - 4],
-        address[address.len() - 5],
         address[address.len() - 6],
+        address[address.len() - 5],
+        address[address.len() - 4],
+        address[address.len() - 3],
+        address[address.len() - 2],
+        address[address.len() - 1],
     ])
 }
 
