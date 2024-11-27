@@ -3,13 +3,16 @@
 #![feature(async_closure)] // async || syntax
 #![no_std]
 #![no_main]
-#![expect(dead_code)] // Silence errors while prototyping.
 
 // extern crate alloc;
 
+mod esp32_imp;
+
+use common::*;
 use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{tcp::TcpSocket, Runner, StackResources, StaticConfigV6};
 use embassy_time::{Duration, Timer, WithTimeout};
+use esp32_imp::{EspSimulator, SnifferWrapper};
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{GpioPin, Input},
@@ -22,77 +25,20 @@ use esp_hal::{
 use esp_wifi::{
     self,
     wifi::{
-        Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiError,
-        WifiStaDevice,
+        Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiStaDevice,
     },
     EspWifiController,
 };
 use ieee80211::mac_parser::MACAddress;
-use mesh_algo::Packet;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
-use util::UnwrapExt;
+use tree_mesh::{simulator::Simulator, Packet};
 
-/// Unsorted utilities.
-#[macro_use]
-mod util;
-mod mesh_algo;
+tree_mesh::define_monomorphized_tasks! {EspSimulator}
 
 mod consts {
-    use embassy_net::{Ipv6Address, Ipv6Cidr};
     use ieee80211::mac_parser::MACAddress;
 
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
-
-    /// SSID shared between all nodes in mesh.
-    pub const SSID: &'static str = if let Some(x) = option_env!("SSID") {
-        x
-    } else {
-        "esp-mesh-default-ssid"
-    };
-
-    /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>
-    pub const ESPRESSIF_OUI: &'static [u8] = [0x10, 0x06, 0x1C].as_slice();
-
-    /// Maximum number of nodes supported in the network at once.
-    pub const MAX_NODES: usize = 5;
-
-    /// Protocol version.
-    pub const PROT_VERSION: u8 = 0;
-
-    pub const IP_PREFIX_LEN: u8 = 48;
-
-    /// CIDR used for gateway (AP).
-    // The `fc00` prefix used here is dedicated to private networks by the spec.
-    pub const AP_CIDR: Ipv6Cidr =
-        Ipv6Cidr::new(Ipv6Address::new(0xfc00, 0, 0, 0, 0, 0, 0, 1), IP_PREFIX_LEN);
-
-    /// `Ipv6Cidr` from `MACAddress` by embedding the mac as the last 6 bytes of address.
-    pub const fn sta_cidr_from_mac(mac: MACAddress) -> Ipv6Cidr {
-        let mac_ip: [u8; 16] = [
-            0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac.0[5], mac.0[4], mac.0[3], mac.0[2], mac.0[1],
-            mac.0[0],
-        ];
-        Ipv6Cidr::new(Ipv6Address(mac_ip), IP_PREFIX_LEN)
-    }
-
-    /// `MACAddress` from `Ipv6Cidr` by extracting the embedded mac.
-    pub const fn mac_from_sta_addr(ip: Ipv6Address) -> MACAddress {
-        let address = ip.0;
-        MACAddress([
-            address[address.len() - 1],
-            address[address.len() - 2],
-            address[address.len() - 3],
-            address[address.len() - 4],
-            address[address.len() - 5],
-            address[address.len() - 6],
-        ])
-    }
-
-    /// Port used for forwarding data.
-    pub const DATA_PORT: u16 = 8000;
-
-    /// Port used for mesh control messages.
-    pub const CONTROL_PORT: u16 = 8001;
 
     // `MACAddress` of the root node
     // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
@@ -139,7 +85,7 @@ fn log_packet(pkt: &PromiscuousPkt) {
 /// The callback for any detected packet.
 pub fn sniffer_callback(pkt: PromiscuousPkt) {
     let pkt = &pkt;
-    mesh_algo::sniffer_callback(pkt);
+    tree_mesh::sniffer_callback::<esp32_imp::EspSimulator>(&pkt.data);
 
     // Only log some of packets to avoid overload.
     // Otherwise the network stack starts failing because logging takes too long.
@@ -155,42 +101,6 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
     }
 }
 
-/// Try `retries` times to connect.
-/// # Panics
-/// If Wifi is not intialized with STA.
-async fn connect_to_other_node(
-    controller: &mut WifiController<'static>,
-    bssid: MACAddress,
-    retries: usize,
-) -> Result<(), WifiError> {
-    let mut config = controller.configuration().unwrap();
-    if config.as_client_conf_ref().unwrap().bssid == Some(bssid.0)
-        && matches!(controller.is_connected(), Ok(true))
-    {
-        log::warn!(
-            "try connect to {} but already connected",
-            MACAddress(config.as_client_conf_ref().unwrap().bssid.unwrap())
-        );
-        return Ok(());
-    }
-
-    config.as_mixed_conf_mut().0.bssid = Some(bssid.0);
-    controller.set_configuration(&config).unwrap();
-
-    futures_lite::future::poll_once(controller.disconnect_async())
-        .await
-        .unwrap_or_log("disconnect unfinished");
-
-    let mut res = Ok(());
-    for _ in 0..retries {
-        res = controller.connect_async().await;
-        if res.is_ok() {
-            break;
-        }
-    }
-    res
-}
-
 /// Handle wifi (both AP and STA).
 #[embassy_executor::task]
 async fn connection(
@@ -204,12 +114,12 @@ async fn connection(
     // Though apparently "WPA2-Enterprise" is? <https://github.com/esp-rs/esp-hal/issues/1608>
     // So maybe we'll use that?
     let ap_conf = esp_wifi::wifi::AccessPointConfiguration {
-        ssid: consts::SSID.try_into().unwrap(),
+        ssid: tree_mesh::consts::SSID.try_into().unwrap(),
         ssid_hidden: true, // Hidden just means the ssid field is empty (transmitted with length 0) in the default beacons.
         ..Default::default()
     };
     let sta_conf = esp_wifi::wifi::ClientConfiguration {
-        ssid: consts::SSID.try_into().unwrap(),
+        ssid: tree_mesh::consts::SSID.try_into().unwrap(),
         auth_method: esp_wifi::wifi::AuthMethod::None,
         // password: env!("STA_PASSWORD").try_into().unwrap(),
         ..Default::default()
@@ -223,40 +133,26 @@ async fn connection(
     sniffer.set_promiscuous_mode(true).unwrap();
 
     let controller = make_static!(
-        mesh_algo::AsyncMutex<WifiController<'static>>,
-        mesh_algo::AsyncMutex::new(controller)
+        tree_mesh::AsyncMutex<WifiController<'static>>,
+        tree_mesh::AsyncMutex::new(controller)
     );
 
     // Connect to identified parents if not root.
     if consts::TREE_LEVEL != Some(0) {
-        spawn.must_spawn(mesh_algo::connect_to_next_parent(controller));
+        spawn.must_spawn(__connect_to_next_parent_monomorph(controller));
     }
     sniffer.set_receive_cb(sniffer_callback);
-    spawn.must_spawn(mesh_algo::beacon_vendor_tx(sniffer, ap_mac));
-}
-
-/// Convert from the default sta mac to ap mac.
-///
-/// See [`esp_hal::efuse::Efuse::mac_address()`], [`esp_wifi::wifi::ap_mac`], [`esp_wifi::wifi::sta_mac`]
-// I don't know why the ap and sta macs are chosen the way they are but that makes the below work, so whatever.
-pub fn sta_mac_to_ap(mut mac: MACAddress) -> MACAddress {
-    mac.0[0] |= 2;
-    mac
-}
-/// Convert from the default ap mac to sta mac.
-///
-/// See [`esp_hal::efuse::Efuse::mac_address()`], [`esp_wifi::wifi::ap_mac`], [`esp_wifi::wifi::sta_mac`]
-// I don't know why the ap and sta macs are chosen the way they are, but that makes the below work, so whatever.
-pub fn ap_mac_to_sta(mut mac: MACAddress) -> MACAddress {
-    mac.0[0] &= u8::MAX ^ 2;
-    mac
+    spawn.must_spawn(__beacon_vendor_tx_wrapper_monomorph(
+        SnifferWrapper(sniffer),
+        ap_mac,
+    ));
 }
 
 #[handler]
 fn print_backtrace() {
     esp_println::println!("Watchdog backtrace:");
+    // copied from `esp_backtrace` internals.
     for addr in esp_backtrace::arch::backtrace().into_iter().flatten() {
-        // copied from `esp_backtrace` internals.
         esp_println::println!("0x{:x}", addr - 3)
     }
 }
@@ -320,32 +216,32 @@ async fn main(spawn: embassy_executor::Spawner) {
     let ap_mac = MACAddress(wifi_ap_interface.mac_address());
     let sta_mac = MACAddress(wifi_sta_interface.mac_address());
     log::info!("ap_mac: {}; sta_mac: {}", ap_mac, sta_mac);
-    assert_eq!(ap_mac_to_sta(ap_mac), sta_mac);
-    assert_eq!(sta_mac_to_ap(sta_mac), ap_mac);
+    assert_eq!(EspSimulator::ap_mac_to_sta(ap_mac), sta_mac);
+    assert_eq!(EspSimulator::sta_mac_to_ap(sta_mac), ap_mac);
 
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
-            address: consts::AP_CIDR,
-            gateway: Some(consts::AP_CIDR.address()),
+            address: tree_mesh::consts::AP_CIDR,
+            gateway: Some(tree_mesh::consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
         make_static!(
-            StackResources::<{ consts::MAX_NODES * 2 }>,
-            StackResources::<{ consts::MAX_NODES * 2 }>::new()
+            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
+            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>::new()
         ),
         prng.gen(),
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
-            address: consts::sta_cidr_from_mac(ap_mac),
-            gateway: Some(consts::AP_CIDR.address()),
+            address: tree_mesh::consts::sta_cidr_from_mac(ap_mac),
+            gateway: Some(tree_mesh::consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
         make_static!(
-            StackResources::<{ consts::MAX_NODES * 2 }>,
-            StackResources::<{ consts::MAX_NODES * 2 }>::new()
+            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
+            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>::new()
         ),
         prng.gen(),
     );
@@ -392,7 +288,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             rx_socket.set_timeout(Some(Duration::from_secs(10)));
             ap_tx_socket.set_timeout(Some(Duration::from_secs(10)));
             sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
-            spawn.must_spawn(mesh_algo::accept_sta_and_forward(
+            spawn.must_spawn(tree_mesh::accept_sta_and_forward(
                 rx_socket,
                 ap_mac,
                 ap_tx_socket,
@@ -424,7 +320,7 @@ async fn main(spawn: embassy_executor::Spawner) {
 
         ap_rx_socket.set_timeout(Some(Duration::from_secs(10)));
         sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
-        spawn.must_spawn(mesh_algo::propagate_neighbors(ap_rx_socket, sta_tx_socket));
+        spawn.must_spawn(__propagate_neighbors_monomorph(ap_rx_socket, sta_tx_socket));
     }
 
     let sta_socket = make_static!(
@@ -461,8 +357,8 @@ async fn main(spawn: embassy_executor::Spawner) {
                     err!(e);
                 };
             }
-            mesh_algo::socket_force_closed(ap_socket).await;
-            mesh_algo::socket_force_closed(sta_socket).await;
+            tree_mesh::socket_force_closed(ap_socket).await;
+            tree_mesh::socket_force_closed(sta_socket).await;
         }
         spawn.must_spawn(f(ap_socket, sta_socket));
     } else {
@@ -481,7 +377,7 @@ async fn main(spawn: embassy_executor::Spawner) {
                     err!(e);
                 };
             }
-            mesh_algo::socket_force_closed(ap_socket).await;
+            tree_mesh::socket_force_closed(ap_socket).await;
         }
 
         spawn.must_spawn(f(ap_socket));

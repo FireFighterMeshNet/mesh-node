@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+common = { version = "0.1.0", path = "../common" }
 critical-section = "1.2.0"
 either = { version = "1.13.0", default-features = false }
 embassy-executor = { version = "0.6.0", features = ["nightly", "executor-thread", "executor-interrupt"] }
@@ -45,6 +46,7 @@ rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 scroll = { version = "0.12.0", default-features = false, features = ["derive"]}
 smoltcp = { version = "0.11.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-raw"] }
 static_cell = "2.1.0"
+tree_mesh = { version = "0.1.0", path = "../tree_mesh" }
 zerocopy = { version = "0.8.9", features = ["derive"] }
 
 [patch.crates-io]
@@ -80,6 +82,7 @@ opt-level = "z"
 overflow-checks = false
 
 [build-dependencies]
+common = { version = "0.1.0", path = "../common", features = ["build"] }
 const-gen = "1.6.5"
 
 [features]

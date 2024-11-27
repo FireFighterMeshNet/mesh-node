@@ -11,7 +11,7 @@ impl<T: RxTokenEmbassy> RxTokenEmbassy for RxToken<T> {
             let res = f(buf);
             let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
             let frame = EthernetRepr::parse(&frame).unwrap();
-            esp_println::dbg!(frame);
+            let _ = frame;
             res
         })
     }
@@ -32,11 +32,11 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
                     let ipv6 = smoltcp::wire::Ipv6Packet::new_unchecked(&*payload);
                     let payload = ipv6.payload();
                     let ipv6 = smoltcp::wire::Ipv6Repr::parse(&ipv6).unwrap();
-                    esp_println::dbg!(ipv6);
                     match ipv6.next_header {
                         smoltcp::wire::IpProtocol::Tcp => {
                             let tcp = smoltcp::wire::TcpPacket::new_unchecked(payload);
                             let payload = tcp.payload();
+                            let _ = payload;
                             let tcp = smoltcp::wire::TcpRepr::parse(
                                 &tcp,
                                 &ipv6.src_addr.into_address(),
@@ -44,14 +44,13 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
                                 &ChecksumCapabilities::default(),
                             )
                             .unwrap();
-                            esp_println::dbg!(tcp, payload);
+                            let _ = tcp;
                         }
                         _ => (),
                     }
                 }
                 _ => (),
             }
-            esp_println::dbg!(frame);
             res
         })
     }
@@ -70,9 +69,15 @@ impl<D> MeshDevice<D> {
     }
 }
 impl<D: Driver> Driver for MeshDevice<D> {
-    type RxToken<'a> = RxToken<D::RxToken<'a>> where Self: 'a;
+    type RxToken<'a>
+        = RxToken<D::RxToken<'a>>
+    where
+        Self: 'a;
 
-    type TxToken<'a> = TxToken<D::TxToken<'a>> where Self: 'a;
+    type TxToken<'a>
+        = TxToken<D::TxToken<'a>>
+    where
+        Self: 'a;
 
     fn receive(
         &mut self,

@@ -1,18 +1,9 @@
-// See <https://doc.rust-lang.org/cargo/reference/build-scripts.html> to explain what this file is.
+use std::{env::VarError, num::ParseIntError, str::FromStr};
 
-use const_gen::{const_declaration, CompileConst};
-use std::{
-    env::{self, VarError},
-    fs,
-    num::ParseIntError,
-    path::Path,
-    str::FromStr,
-};
-
-type MACAddress = [u8; 6];
+pub type MACAddress = [u8; 6];
 
 /// Like [`option_env!`] but tries to parse the environment variable as `T`.
-fn parse_option_env<T>(env: &'static str) -> Option<T>
+pub fn parse_option_env<T>(env: &'static str) -> Option<T>
 where
     T: FromStr,
     <T as FromStr>::Err: std::fmt::Display,
@@ -35,7 +26,7 @@ where
 }
 
 /// Parse a single colon seperated mac like `12:34:56:78:9a:bc`.
-fn parse_mac(s: &str) -> Result<(&str, MACAddress), ParseIntError> {
+pub fn parse_mac(s: &str) -> Result<(&str, MACAddress), ParseIntError> {
     Ok((
         &s[17..],
         [
@@ -50,7 +41,7 @@ fn parse_mac(s: &str) -> Result<(&str, MACAddress), ParseIntError> {
 }
 
 /// Parse a list of macs like `12:34:56:78:9a:bc,12:34:56:78:9a:de`
-fn parse_mac_list(env: &'static str) -> Vec<MACAddress> {
+pub fn parse_mac_list(env: &'static str) -> Vec<MACAddress> {
     println!("cargo::rerun-if-env-changed={}", env);
     match std::env::var(env) {
         Ok(env_str) => match {
@@ -77,33 +68,4 @@ fn parse_mac_list(env: &'static str) -> Vec<MACAddress> {
             Vec::new()
         }
     }
-}
-
-fn main() {
-    println!("cargo::rerun-if-changed=build.rs");
-
-    let out_dir = env::var_os("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("const_gen.rs");
-
-    let const_declarations = [
-        const_declaration!(
-            /// RNG seed set at build time.
-            pub RNG_SEED = parse_option_env::<u64>("RNG_SEED")
-        ),
-        const_declaration!(
-            /// Hardcoded tree level. This is `0` for the Root.
-            pub TREE_LEVEL = parse_option_env::<u8>("TREE_LEVEL")
-        ),
-        const_declaration!(
-            /// Deny listed macs (mostly for debugging) (don't connect to these)
-            pub DENYLIST_MACS = parse_mac_list("DENYLIST_MACS").as_slice()
-        ),
-        const_declaration!(
-            /// Root MAC as an array.
-            pub ROOT_MAC_ARR = parse_mac_list("ROOT_MAC").first().expect("ROOT_MAC should be set")
-        ),
-    ]
-    .join("\n");
-
-    fs::write(dest_path, const_declarations).unwrap();
 }

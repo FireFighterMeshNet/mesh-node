@@ -1,6 +1,6 @@
 use super::*;
-use crate::sta_mac_to_ap;
 use core::ops::ControlFlow;
+use simulator::Simulator;
 use zerocopy::IntoBytes;
 
 #[derive(
@@ -139,7 +139,7 @@ async fn drain_requeued() {
 }
 
 /// Handle receiving propagate neighbor messages.
-async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) {
+async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) -> ! {
     let mut buf = [0u8; size_of::<PropagateNeighborMsg>()];
 
     // Accept connection, handle neighbor changes, wait for client to disconnect.
@@ -159,6 +159,7 @@ async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) {
                             msg,
                             consts::mac_from_sta_addr(match remote.addr {
                                 embassy_net::IpAddress::Ipv6(address) => address,
+                                _ => todo!(),
                             }),
                         )
                         .await;
@@ -177,7 +178,7 @@ async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) {
 }
 
 /// Send propagate neighbor messages.
-async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) {
+async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) -> ! {
     // Connect to parent, send queued updates, disconnect.
     loop {
         sta_tx_socket.close();
@@ -216,13 +217,12 @@ async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) 
 
 /// Send and receive multi-hop neighbor updates.
 /// Tell parent what children have connected and handle the same messages from children.
-#[embassy_executor::task]
-pub async fn propagate_neighbors(
+pub async fn propagate_neighbors<S: Simulator>(
     ap_rx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
-) {
-    wifi::event::ApStadisconnected::update_handler(|_, event| {
-        let ap_mac = sta_mac_to_ap(MACAddress(event.0.mac));
+) -> ! {
+    S::ApStadisconnected::update_handler(|_, event| {
+        let ap_mac = S::sta_mac_to_ap(event.mac());
         MAC_CHANGE_TO_TX
             .try_send(PropagateNeighborMsg::Disconnect(ap_mac.0))
             .todo_msg("too many new macs");
@@ -236,8 +236,8 @@ pub async fn propagate_neighbors(
             }
         })
     });
-    wifi::event::ApStaconnected::update_handler(|_, event| {
-        let ap_mac = sta_mac_to_ap(MACAddress(event.0.mac));
+    S::ApStaconnected::update_handler(|_, event| {
+        let ap_mac = S::sta_mac_to_ap(event.mac());
         critical_section::with(|cs| {
             let table = &mut *STATE.borrow_ref_mut(cs);
             table.map.insert(
@@ -260,5 +260,6 @@ pub async fn propagate_neighbors(
         rx_propagate_neighbors(ap_rx_socket),
         tx_propagate_neighbors(sta_tx_socket),
     )
-    .await;
+    .await
+    .0;
 }

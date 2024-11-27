@@ -34,6 +34,7 @@ macro_rules! make_static {
 }
 
 /// Log error with [`core::fmt::Debug`] impl or [`core::fmt::Display`] if called with leading `%`
+#[macro_export]
 macro_rules! err {
     ($e:expr) => {
         if let Err(e) = $e {

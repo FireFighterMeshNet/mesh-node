@@ -1,0 +1,12 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+either = { version = "1.13.0", default-features = false }
+futures-lite = { version = "2.3.0", default-features = false, features = ["race"] }
+log = { version = "0.4.21" }
+
+[features]
+build = []

@@ -104,6 +104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.1.0"
+dependencies = [
+ "either",
+ "futures-lite",
+ "log",
+]
+
+[[package]]
 name = "const-gen"
 version = "1.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -301,9 +310,9 @@ dependencies = [
 
 [[package]]
 name = "embassy-executor"
-version = "0.6.0"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ed0e24bdd4a5f4ff1b72ee4f264b1d23e179ea71a77d984b5fd24877a2bbe1"
+checksum = "f64f84599b0f4296b92a4b6ac2109bc02340094bda47b9766c5f9ec6a318ebf8"
 dependencies = [
  "critical-section",
  "document-features",
@@ -312,9 +321,9 @@ dependencies = [
 
 [[package]]
 name = "embassy-executor-macros"
-version = "0.5.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4d4c0c34b32c2c653c9eecce1cefaf8539dd9a54e61deb5499254f01e2fcac2"
+checksum = "3577b1e9446f61381179a330fc5324b01d511624c55f25e3c66c9e3c626dbecf"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -782,6 +791,7 @@ checksum = "e8c02a5121d4ea3eb16a80748c74f5549a5665e4c21333c6098f283870fbdea6"
 name = "ffmn_nostd"
 version = "0.1.0"
 dependencies = [
+ "common",
  "const-gen",
  "critical-section",
  "either",
@@ -806,6 +816,7 @@ dependencies = [
  "scroll",
  "smoltcp 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "static_cell",
+ "tree_mesh",
  "zerocopy",
 ]
 
@@ -1659,6 +1670,30 @@ dependencies = [
  "serde_spanned",
  "toml_datetime",
  "winnow",
+]
+
+[[package]]
+name = "tree_mesh"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "const-gen",
+ "critical-section",
+ "embassy-executor",
+ "embassy-net",
+ "embassy-sync 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-time",
+ "embedded-io-async",
+ "error_set",
+ "futures-lite",
+ "heapless 0.8.0",
+ "ieee80211",
+ "log",
+ "rand",
+ "scroll",
+ "smoltcp 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "static_cell",
+ "zerocopy",
 ]
 
 [[package]]

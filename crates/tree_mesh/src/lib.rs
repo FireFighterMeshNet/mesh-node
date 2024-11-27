@@ -1,16 +1,21 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
+#![cfg_attr(not(feature = "std"), no_std)]
+#![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
+#![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
+#![feature(async_closure)] // async || syntax
 
+pub mod consts;
 pub mod device;
-mod macros;
-mod node_data;
-mod packet;
+pub mod macros;
+pub mod node_data;
+pub mod packet;
 mod propagate_neighbors;
+pub mod simulator;
 
 pub use packet::{Packet, PacketHeader};
-#[allow(unused_imports)]
 pub use propagate_neighbors::{propagate_neighbors, PropagateNeighborMsg};
 
-use crate::{connect_to_other_node, consts, util::UnwrapExt};
+use common::{err, UnwrapExt};
 use core::{cell::RefCell, marker::PhantomData};
 use critical_section::Mutex;
 use embassy_net::{
@@ -25,7 +30,6 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Timer, WithTimeout};
 use embedded_io_async::{Read, Write};
-use esp_wifi::wifi::{self, event::EventExt, PromiscuousPkt, Sniffer, WifiController};
 use heapless::FnvIndexMap;
 use ieee80211::{
     common::CapabilitiesInformation,
@@ -36,6 +40,7 @@ use ieee80211::{
 };
 use node_data::{NodeData, NodeDataBeaconMsg, NodeTable};
 use scroll::{ctx::SizeWith, Pread, Pwrite};
+use simulator::*;
 
 error_set::error_set! {
     SendToParentErr = {
@@ -193,10 +198,10 @@ async fn next_hop_socket<'a>(
         if let Some(dest) = table
             .map
             .iter()
-            .find(|x| esp_println::dbg!(*x.0) == esp_println::dbg!(address))
+            .find(|x| *x.0 == address)
             .map(|x| x.1.clone())
         {
-            return esp_println::dbg!(dest.postion);
+            return dest.postion;
         }
 
         // If the addressed node isn't known to this node, hopefully a higher node does know it.
@@ -340,10 +345,10 @@ static STATE: Mutex<RefCell<NodeTable>> = Mutex::new(RefCell::new(NodeTable {
 static NEXT_PARENT: Signal<MACAddress> = Signal::new();
 
 /// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
-pub fn sniffer_callback(pkt: &PromiscuousPkt) {
+pub fn sniffer_callback<S: Simulator>(data: &[u8]) {
     // Return quick helps since this is called and blocks every packet.
     // Ignore non-beacon frames.
-    let Ok(beacon) = ieee80211::match_frames!(pkt.data, beacon = BeaconFrame => { beacon }) else {
+    let Ok(beacon) = ieee80211::match_frames!(data, beacon = BeaconFrame => { beacon }) else {
         return;
     };
     // Ignore non-matching SSID.
@@ -359,7 +364,7 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
         .elements
         .get_matching_elements::<VendorSpecificElement>()
     {
-        let Some(payload) = field.get_payload_if_prefix_matches(consts::ESPRESSIF_OUI) else {
+        let Some(payload) = field.get_payload_if_prefix_matches(&S::OUI) else {
             log::debug!("unmatched beacon field: {:?}", field);
             continue;
         };
@@ -422,8 +427,7 @@ pub fn sniffer_callback(pkt: &PromiscuousPkt) {
 }
 
 /// Periodic transmit of beacon with custom vendor data.
-#[embassy_executor::task]
-pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> ! {
+pub async fn beacon_vendor_tx<S: Simulator>(mut sniffer: S::Sniffer, source_mac: MACAddress) -> ! {
     log::info!("sending vendor-beacons");
 
     // Buffer for beacon body
@@ -448,7 +452,7 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> !
                             SSIDElement::new(consts::SSID).unwrap(),
                             VendorSpecificElement::new_prefixed(
                                 // Vender specific OUI is first 3 bytes. Rest is payload concatenated.
-                                consts::ESPRESSIF_OUI,
+                                &S::OUI,
                                 data,
                             )
                         },
@@ -463,7 +467,7 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> !
         // Will give an `ESP_ERR_INVALID_ARG` if sending for most configurations if `use_internal_seq_num` != true when wi-fi is initialized.
         // See <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#side-effects-to-avoid-in-different-scenarios>
         log::trace!("beacon tx");
-        if let Err(e) = sniffer.send_raw_frame(false, &beacon[0..length], true) {
+        if let Err(e) = sniffer.send_raw_frame(&beacon[0..length]) {
             log::error!("Failed to send beacon: {e:?}")
         }
         log::trace!("beacon tx'ed");
@@ -473,12 +477,13 @@ pub async fn beacon_vendor_tx(mut sniffer: Sniffer, source_mac: MACAddress) -> !
 }
 
 /// Connects to new parent nodes if a better one is found.
-#[embassy_executor::task]
-pub async fn connect_to_next_parent(controller: &'static AsyncMutex<WifiController<'static>>) -> ! {
+pub async fn connect_to_next_parent<S: Simulator>(
+    controller: &'static AsyncMutex<S::Controller>,
+) -> ! {
     // Make sure to update state on disconnects.
-    wifi::event::StaDisconnected::update_handler(|cs, event| {
+    S::StaDisconnected::update_handler(|cs, event| {
         STATE.borrow_ref_mut(cs).mark_me_disconnected();
-        log::warn!("STA disconnected: {}", MACAddress(event.0.bssid));
+        log::warn!("STA disconnected: {}", event.mac());
     });
 
     // Keep connecting to `NEXT_PARENT` whenever a new one is identified.
@@ -486,7 +491,7 @@ pub async fn connect_to_next_parent(controller: &'static AsyncMutex<WifiControll
         let next_parent = NEXT_PARENT.wait().await;
         log::info!("connecting: mac={next_parent}");
 
-        let res = connect_to_other_node(&mut *controller.lock().await, next_parent, 1)
+        let res = S::connect_to_other_node(&mut *controller.lock().await, next_parent, 1)
             .with_timeout(Duration::from_secs(60))
             .await;
 
@@ -537,3 +542,38 @@ pub async fn connect_to_next_parent(controller: &'static AsyncMutex<WifiControll
         }
     }
 }
+
+/// Define tasks using the given implementor of [`Simulator`]
+// TODO proc macro instead of manually implementing for each task.
+#[macro_export]
+macro_rules! define_monomorphized_tasks {
+    ($s:path) => {
+        #[embassy_executor::task]
+        pub async fn __beacon_vendor_tx_wrapper_monomorph(
+            sniffer: <$s as $crate::simulator::Simulator>::Sniffer,
+            source_mac: MACAddress,
+        ) -> ! {
+            $crate::beacon_vendor_tx::<$s>(sniffer, source_mac).await
+        }
+
+        #[embassy_executor::task]
+        pub async fn __connect_to_next_parent_monomorph(
+            controller: &'static $crate::AsyncMutex<
+                <$s as $crate::simulator::Simulator>::Controller,
+            >,
+        ) -> ! {
+            $crate::connect_to_next_parent::<$s>(controller).await
+        }
+
+        #[embassy_executor::task]
+        pub async fn __propagate_neighbors_monomorph(
+            ap_rx_socket: &'static mut TcpSocket<'static>,
+            sta_tx_socket: &'static mut TcpSocket<'static>,
+        ) -> ! {
+            $crate::propagate_neighbors::<$s>(ap_rx_socket, sta_tx_socket).await
+        }
+    };
+}
+
+#[cfg(test)]
+define_monomorphized_tasks! {simulator::imp::TestSimulator}
