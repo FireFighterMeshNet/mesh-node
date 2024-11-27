@@ -157,10 +157,13 @@ async fn rx_propagate_neighbors(ap_rx_socket: &'static mut TcpSocket<'static>) -
                     Ok(msg) => {
                         update_from_msg(
                             msg,
-                            consts::mac_from_sta_addr(match remote.addr {
-                                embassy_net::IpAddress::Ipv6(address) => address,
-                                _ => todo!(),
-                            }),
+                            consts::mac_from_sta_addr(
+                                #[allow(unreachable_patterns)]
+                                match remote.addr {
+                                    embassy_net::IpAddress::Ipv6(address) => address,
+                                    _ => unreachable!(),
+                                },
+                            ),
                         )
                         .await;
                         drain_requeued().await;
@@ -217,7 +220,7 @@ async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) 
 
 /// Send and receive multi-hop neighbor updates.
 /// Tell parent what children have connected and handle the same messages from children.
-pub async fn propagate_neighbors<S: Simulator>(
+pub(crate) async fn propagate_neighbors<S: Simulator>(
     ap_rx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
 ) -> ! {

@@ -13,7 +13,6 @@ mod propagate_neighbors;
 pub mod simulator;
 
 pub use packet::{Packet, PacketHeader};
-pub use propagate_neighbors::{propagate_neighbors, PropagateNeighborMsg};
 
 use common::{err, UnwrapExt};
 use core::{cell::RefCell, marker::PhantomData};
@@ -427,7 +426,10 @@ pub fn sniffer_callback<S: Simulator>(data: &[u8]) {
 }
 
 /// Periodic transmit of beacon with custom vendor data.
-pub async fn beacon_vendor_tx<S: Simulator>(mut sniffer: S::Sniffer, source_mac: MACAddress) -> ! {
+pub(crate) async fn beacon_vendor_tx<S: Simulator>(
+    mut sniffer: S::Sniffer,
+    source_mac: MACAddress,
+) -> ! {
     log::info!("sending vendor-beacons");
 
     // Buffer for beacon body
@@ -477,7 +479,7 @@ pub async fn beacon_vendor_tx<S: Simulator>(mut sniffer: S::Sniffer, source_mac:
 }
 
 /// Connects to new parent nodes if a better one is found.
-pub async fn connect_to_next_parent<S: Simulator>(
+pub(crate) async fn connect_to_next_parent<S: Simulator>(
     controller: &'static AsyncMutex<S::Controller>,
 ) -> ! {
     // Make sure to update state on disconnects.
@@ -543,37 +545,19 @@ pub async fn connect_to_next_parent<S: Simulator>(
     }
 }
 
-/// Define tasks using the given implementor of [`Simulator`]
-// TODO proc macro instead of manually implementing for each task.
-#[macro_export]
-macro_rules! define_monomorphized_tasks {
-    ($s:path) => {
-        #[embassy_executor::task]
-        pub async fn __beacon_vendor_tx_wrapper_monomorph(
-            sniffer: <$s as $crate::simulator::Simulator>::Sniffer,
-            source_mac: MACAddress,
-        ) -> ! {
-            $crate::beacon_vendor_tx::<$s>(sniffer, source_mac).await
-        }
-
-        #[embassy_executor::task]
-        pub async fn __connect_to_next_parent_monomorph(
-            controller: &'static $crate::AsyncMutex<
-                <$s as $crate::simulator::Simulator>::Controller,
-            >,
-        ) -> ! {
-            $crate::connect_to_next_parent::<$s>(controller).await
-        }
-
-        #[embassy_executor::task]
-        pub async fn __propagate_neighbors_monomorph(
-            ap_rx_socket: &'static mut TcpSocket<'static>,
-            sta_tx_socket: &'static mut TcpSocket<'static>,
-        ) -> ! {
-            $crate::propagate_neighbors::<$s>(ap_rx_socket, sta_tx_socket).await
-        }
-    };
+/// Run all background tasks needed for the tree mesh
+pub async fn run<S: Simulator>(
+    sniffer: S::Sniffer,
+    controller: &'static AsyncMutex<S::Controller>,
+    ap_rx_socket: &'static mut TcpSocket<'static>,
+    sta_tx_socket: &'static mut TcpSocket<'static>,
+    ap_mac: MACAddress,
+) -> ! {
+    use futures_lite::future::zip;
+    let future1 = beacon_vendor_tx::<S>(sniffer, ap_mac);
+    let future2 = connect_to_next_parent::<S>(controller);
+    let future3 = propagate_neighbors::propagate_neighbors::<S>(ap_rx_socket, sta_tx_socket);
+    // Make sure to balance (binary tree) as more futures are added.
+    let res = zip(future1, zip(future2, future3)).await;
+    res.0
 }
-
-#[cfg(test)]
-define_monomorphized_tasks! {simulator::imp::TestSimulator}

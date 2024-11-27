@@ -10,7 +10,7 @@ mod esp32_imp;
 
 use common::*;
 use core::{sync::atomic::AtomicU8, u8};
-use embassy_net::{tcp::TcpSocket, Runner, StackResources, StaticConfigV6};
+use embassy_net::{tcp::TcpSocket, Runner, Stack, StackResources, StaticConfigV6};
 use embassy_time::{Duration, Timer, WithTimeout};
 use esp32_imp::{EspSimulator, SnifferWrapper};
 use esp_backtrace as _;
@@ -31,9 +31,7 @@ use esp_wifi::{
 };
 use ieee80211::mac_parser::MACAddress;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
-use tree_mesh::{simulator::Simulator, Packet};
-
-tree_mesh::define_monomorphized_tasks! {EspSimulator}
+use tree_mesh::{simulator::Simulator, AsyncMutex, Packet};
 
 mod consts {
     use ieee80211::mac_parser::MACAddress;
@@ -70,6 +68,37 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
     runner.run().await
 }
 
+#[embassy_executor::task]
+async fn tree_mesh_task(
+    sniffer: <EspSimulator as Simulator>::Sniffer,
+    controller: &'static AsyncMutex<<EspSimulator as Simulator>::Controller>,
+    ap_stack: Stack<'static>,
+    sta_stack: Stack<'static>,
+    ap_mac: MACAddress,
+) -> ! {
+    let ap_rx_socket = make_static!(
+        TcpSocket<'static>,
+        TcpSocket::new(
+            ap_stack,
+            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+        )
+    );
+    ap_rx_socket.set_timeout(Some(Duration::from_secs(10)));
+
+    let sta_tx_socket = make_static!(
+        TcpSocket<'static>,
+        TcpSocket::new(
+            sta_stack,
+            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+        )
+    );
+    sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
+
+    tree_mesh::run::<EspSimulator>(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac).await
+}
+
 /// Output packet's data as expected by the wifi-shark extcap at `INFO` level.
 fn log_packet(pkt: &PromiscuousPkt) {
     #[inline]
@@ -101,11 +130,12 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
     }
 }
 
-/// Handle wifi (both AP and STA).
-#[embassy_executor::task]
-async fn connection(
+/// Setup both AP and STA.
+async fn setup_connection(
     spawn: embassy_executor::Spawner,
     mut controller: WifiController<'static>,
+    ap_stack: Stack<'static>,
+    sta_stack: Stack<'static>,
     ap_mac: MACAddress,
 ) {
     // Setup initial configuration
@@ -137,13 +167,13 @@ async fn connection(
         tree_mesh::AsyncMutex::new(controller)
     );
 
-    // Connect to identified parents if not root.
-    if consts::TREE_LEVEL != Some(0) {
-        spawn.must_spawn(__connect_to_next_parent_monomorph(controller));
-    }
     sniffer.set_receive_cb(sniffer_callback);
-    spawn.must_spawn(__beacon_vendor_tx_wrapper_monomorph(
+
+    spawn.must_spawn(tree_mesh_task(
         SnifferWrapper(sniffer),
+        controller,
+        ap_stack,
+        sta_stack,
         ap_mac,
     ));
 }
@@ -248,8 +278,8 @@ async fn main(spawn: embassy_executor::Spawner) {
 
     spawn.must_spawn(ap_task(ap_runner));
     spawn.must_spawn(sta_task(sta_runner));
-    spawn.must_spawn(connection(spawn, controller, ap_mac));
     spawn.must_spawn(boot_button_reply(peripherals.GPIO0));
+    setup_connection(spawn, controller, ap_stack, sta_stack, ap_mac).await;
 
     // Wait for AP stack to finish startup.
     ap_stack
@@ -299,29 +329,6 @@ async fn main(spawn: embassy_executor::Spawner) {
     forward_socket!(ap_stack);
     forward_socket!(ap_stack);
     forward_socket!(sta_stack);
-
-    {
-        let ap_rx_socket = make_static!(
-            TcpSocket<'static>,
-            TcpSocket::new(
-                ap_stack,
-                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-            )
-        );
-        let sta_tx_socket = make_static!(
-            TcpSocket<'static>,
-            TcpSocket::new(
-                sta_stack,
-                make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-            )
-        );
-
-        ap_rx_socket.set_timeout(Some(Duration::from_secs(10)));
-        sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
-        spawn.must_spawn(__propagate_neighbors_monomorph(ap_rx_socket, sta_tx_socket));
-    }
 
     let sta_socket = make_static!(
         TcpSocket<'static>,
