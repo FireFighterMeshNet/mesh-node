@@ -3,6 +3,10 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
 #![feature(async_closure)] // async || syntax
+#![feature(ip_from)]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 pub mod consts;
 pub mod device;
@@ -11,6 +15,8 @@ pub mod node_data;
 pub mod packet;
 mod propagate_neighbors;
 pub mod simulator;
+#[cfg(test)]
+mod tests;
 
 pub use packet::{Packet, PacketHeader};
 
@@ -211,13 +217,9 @@ async fn next_hop_socket<'a>(
     });
     // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
     let (ip, tx_socket) = match pos {
-        TreePos::Up | TreePos::Disconnected => {
-            (consts::AP_CIDR.address().into_address(), sta_tx_socket)
-        }
+        TreePos::Up | TreePos::Disconnected => (consts::AP_CIDR.address().into(), sta_tx_socket),
         TreePos::Down(child_mac) => (
-            consts::sta_cidr_from_mac(child_mac)
-                .address()
-                .into_address(),
+            consts::sta_cidr_from_mac(child_mac).address().into(),
             ap_tx_socket,
         ),
     };

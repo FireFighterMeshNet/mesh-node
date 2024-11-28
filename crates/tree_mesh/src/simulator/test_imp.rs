@@ -1,6 +1,6 @@
 use super::{Event, GetMac, Sniffer};
 use critical_section::CriticalSection;
-use embassy_net::driver::{Driver, RxToken, TxToken};
+use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
 
 impl GetMac for MACAddress {
@@ -51,7 +51,9 @@ impl TxToken for TestTxToken {
         todo!()
     }
 }
-pub struct TestDriver;
+pub struct TestDriver {
+    pub mac: [u8; 6],
+}
 impl Driver for TestDriver {
     type RxToken<'a>
         = TestRxToken
@@ -79,11 +81,13 @@ impl Driver for TestDriver {
     }
 
     fn capabilities(&self) -> embassy_net::driver::Capabilities {
-        todo!()
+        let mut caps = Capabilities::default();
+        caps.max_transmission_unit = 1500 + 14;
+        caps
     }
 
     fn hardware_address(&self) -> embassy_net::driver::HardwareAddress {
-        todo!()
+        embassy_net::driver::HardwareAddress::Ethernet(self.mac)
     }
 }
 
