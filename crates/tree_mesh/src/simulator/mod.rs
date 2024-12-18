@@ -3,15 +3,6 @@
 use critical_section::CriticalSection;
 use ieee80211::mac_parser::MACAddress;
 
-#[cfg(test)]
-mod test_imp;
-
-#[allow(unused_imports)]
-pub mod imp {
-    #[cfg(test)]
-    pub use super::test_imp::*;
-}
-
 pub trait GetMac {
     fn mac(&self) -> MACAddress;
 }
@@ -21,11 +12,11 @@ pub trait Event {
 pub trait Sniffer {
     type Error: core::fmt::Debug;
 
-    /// Send raw ieeee80211 frame.
+    /// Send raw ieee80211 frame.
     fn send_raw_frame(&mut self, data: &[u8]) -> Result<(), Self::Error>;
 }
 
-pub trait Simulator {
+pub trait IO {
     const OUI: [u8; 3];
     type WifiError: core::fmt::Debug;
     type Controller;

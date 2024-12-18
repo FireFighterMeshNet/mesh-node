@@ -11,6 +11,20 @@ impl<T: RxTokenEmbassy> RxTokenEmbassy for RxToken<T> {
             let res = f(buf);
             let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
             let frame = EthernetRepr::parse(&frame).unwrap();
+            // TODO remove. dbg
+            match frame {
+                tmp => {
+                    log::info!(
+                        "[{}:{}:{}] {} = {:?}",
+                        core::file!(),
+                        core::line!(),
+                        core::column!(),
+                        core::stringify!(frame),
+                        &tmp,
+                    );
+                    tmp
+                }
+            };
             let _ = frame;
             res
         })
@@ -27,6 +41,20 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
             let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
             let payload = frame.payload();
             let frame = EthernetRepr::parse(&frame).unwrap();
+            // TODO: remove. dbg
+            match &frame {
+                tmp => {
+                    log::info!(
+                        "[{}:{}:{}] {} = {:?}",
+                        core::file!(),
+                        core::line!(),
+                        core::column!(),
+                        core::stringify!(&frame),
+                        &tmp
+                    );
+                    tmp
+                }
+            };
             match frame.ethertype {
                 smoltcp::wire::EthernetProtocol::Ipv6 => {
                     let ipv6 = smoltcp::wire::Ipv6Packet::new_unchecked(&*payload);
@@ -39,8 +67,8 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
                             let _ = payload;
                             let tcp = smoltcp::wire::TcpRepr::parse(
                                 &tcp,
-                                &ipv6.src_addr.into_address(),
-                                &ipv6.dst_addr.into_address(),
+                                &ipv6.src_addr.into(),
+                                &ipv6.dst_addr.into(),
                                 &ChecksumCapabilities::default(),
                             )
                             .unwrap();
@@ -87,7 +115,7 @@ impl<D: Driver> Driver for MeshDevice<D> {
     }
 
     fn transmit(&mut self, cx: &mut core::task::Context) -> Option<Self::TxToken<'_>> {
-        self.inner.transmit(cx).map(|x| TxToken(x))
+        self.inner.transmit(cx).map(TxToken)
     }
 
     fn link_state(&mut self, cx: &mut core::task::Context) -> embassy_net::driver::LinkState {

@@ -1,6 +1,7 @@
 use super::*;
 use core::ops::ControlFlow;
-use simulator::Simulator;
+use embassy_futures::join::join;
+use simulator::IO;
 use zerocopy::IntoBytes;
 
 #[derive(
@@ -220,7 +221,7 @@ async fn tx_propagate_neighbors(sta_tx_socket: &'static mut TcpSocket<'static>) 
 
 /// Send and receive multi-hop neighbor updates.
 /// Tell parent what children have connected and handle the same messages from children.
-pub(crate) async fn propagate_neighbors<S: Simulator>(
+pub(crate) async fn propagate_neighbors<S: IO>(
     ap_rx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
 ) -> ! {
@@ -259,7 +260,7 @@ pub(crate) async fn propagate_neighbors<S: Simulator>(
             .todo_msg("too many new macs");
     });
 
-    futures_lite::future::zip(
+    join(
         rx_propagate_neighbors(ap_rx_socket),
         tx_propagate_neighbors(sta_tx_socket),
     )

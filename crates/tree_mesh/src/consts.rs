@@ -20,7 +20,10 @@ pub const fn sta_cidr_from_mac(mac: MACAddress) -> Ipv6Cidr {
     let mac_ip: [u8; 16] = [
         0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
     ];
-    Ipv6Cidr::new(Ipv6Address::from_octets(mac_ip), IP_PREFIX_LEN)
+    Ipv6Cidr::new(
+        Ipv6Address::from_bits(u128::from_be_bytes(mac_ip)),
+        IP_PREFIX_LEN,
+    )
 }
 
 /// `MACAddress` from `Ipv6Cidr` by extracting the embedded mac.

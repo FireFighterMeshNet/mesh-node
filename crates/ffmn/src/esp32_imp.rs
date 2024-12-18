@@ -58,8 +58,8 @@ impl Sniffer for SnifferWrapper {
 }
 
 /// Implementation of [`tree_mesh::simulator::Simulator`] for esp devices.
-pub struct EspSimulator;
-impl tree_mesh::simulator::Simulator for EspSimulator {
+pub struct EspIO;
+impl tree_mesh::simulator::IO for EspIO {
     /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>
     const OUI: [u8; 3] = [0x10, 0x06, 0x1C];
     type WifiError = esp_wifi::wifi::WifiError;

@@ -7,15 +7,14 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 common = { version = "0.1.0", path = "../common" }
 critical-section = "1.2.0"
-either = { version = "1.13.0", default-features = false }
-embassy-executor = { version = "0.6.0", features = ["nightly", "executor-thread", "executor-interrupt"] }
-embassy-net = { version = "0.4.0", features = [
+embassy-executor = { version = "0.6.3", features = ["nightly", "executor-thread", "executor-interrupt"] }
+embassy-net = { version = "0.5.0", features = [
     "tcp",
     "udp",
     "medium-ethernet", "proto-ipv6"
     # "dhcpv4",
 ] }
-embassy-sync = "0.6.0"
+embassy-sync = "0.6.1"
 embassy-time = { version = "0.3.2", features = ["generic-queue"] }
 embedded-io-async = "0.6.1"
 error_set = "0.7.0"
@@ -40,21 +39,16 @@ esp-wifi = { version = "0.10.1", features = ["esp32",
 futures-lite = { version = "2.3.0", default-features = false, features = ["race"] }
 heapless = "0.8.0"
 ieee80211 = "0.5.0"
-log = { version = "0.4.21" }
+log = { version = "0.4.22" }
 phf = { version = "0.11.2", default-features = false, features = ["macros"] }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
 scroll = { version = "0.12.0", default-features = false, features = ["derive"]}
-smoltcp = { version = "0.11.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-raw"] }
+smoltcp = { version = "0.12.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-raw"] }
 static_cell = "2.1.0"
 tree_mesh = { version = "0.1.0", path = "../tree_mesh" }
 zerocopy = { version = "0.8.9", features = ["derive"] }
 
 [patch.crates-io]
-# change back to regular release after <https://github.com/embassy-rs/embassy/pull/3198>
-embassy-net = { git = "https://github.com/embassy-rs/embassy" }
-embassy-net-driver = { git = "https://github.com/embassy-rs/embassy" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy" }
-embassy-time-driver = { git = "https://github.com/embassy-rs/embassy" }
 # change back to regular release after <https://github.com/Frostie314159/ieee80211-rs/pull/16>
 ieee80211 = { git = "https://github.com/Frostie314159/ieee80211-rs" }
 # change back to regular release after <https://github.com/esp-rs/esp-hal/pull/2392>

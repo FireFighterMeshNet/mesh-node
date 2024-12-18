@@ -12,7 +12,7 @@ use common::*;
 use core::{sync::atomic::AtomicU8, u8};
 use embassy_net::{tcp::TcpSocket, Runner, Stack, StackResources, StaticConfigV6};
 use embassy_time::{Duration, Timer, WithTimeout};
-use esp32_imp::{EspSimulator, SnifferWrapper};
+use esp32_imp::{EspIO, SnifferWrapper};
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{GpioPin, Input},
@@ -31,7 +31,7 @@ use esp_wifi::{
 };
 use ieee80211::mac_parser::MACAddress;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
-use tree_mesh::{simulator::Simulator, AsyncMutex, Packet};
+use tree_mesh::{simulator::IO, AsyncMutex, Packet};
 
 mod consts {
     use ieee80211::mac_parser::MACAddress;
@@ -70,8 +70,8 @@ async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
 
 #[embassy_executor::task]
 async fn tree_mesh_task(
-    sniffer: <EspSimulator as Simulator>::Sniffer,
-    controller: &'static AsyncMutex<<EspSimulator as Simulator>::Controller>,
+    sniffer: <EspIO as IO>::Sniffer,
+    controller: &'static AsyncMutex<<EspIO as IO>::Controller>,
     ap_stack: Stack<'static>,
     sta_stack: Stack<'static>,
     ap_mac: MACAddress,
@@ -96,7 +96,7 @@ async fn tree_mesh_task(
     );
     sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
 
-    tree_mesh::run::<EspSimulator>(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac).await
+    tree_mesh::run::<EspIO>(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac).await
 }
 
 /// Output packet's data as expected by the wifi-shark extcap at `INFO` level.
@@ -114,7 +114,7 @@ fn log_packet(pkt: &PromiscuousPkt) {
 /// The callback for any detected packet.
 pub fn sniffer_callback(pkt: PromiscuousPkt) {
     let pkt = &pkt;
-    tree_mesh::sniffer_callback::<esp32_imp::EspSimulator>(&pkt.data);
+    tree_mesh::sniffer_callback::<esp32_imp::EspIO>(&pkt.data);
 
     // Only log some of packets to avoid overload.
     // Otherwise the network stack starts failing because logging takes too long.
@@ -246,8 +246,8 @@ async fn main(spawn: embassy_executor::Spawner) {
     let ap_mac = MACAddress(wifi_ap_interface.mac_address());
     let sta_mac = MACAddress(wifi_sta_interface.mac_address());
     log::info!("ap_mac: {}; sta_mac: {}", ap_mac, sta_mac);
-    assert_eq!(EspSimulator::ap_mac_to_sta(ap_mac), sta_mac);
-    assert_eq!(EspSimulator::sta_mac_to_ap(sta_mac), ap_mac);
+    assert_eq!(EspIO::ap_mac_to_sta(ap_mac), sta_mac);
+    assert_eq!(EspIO::sta_mac_to_ap(sta_mac), ap_mac);
 
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,

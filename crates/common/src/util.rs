@@ -1,6 +1,4 @@
-use core::future::{Future, IntoFuture};
-use either::Either;
-use futures_lite::FutureExt;
+use core::{future::Future, pin::Pin};
 
 // See <https://github.com/embassy-rs/static-cell/issues/16>
 /// Convert a `T` to a `&'static mut T`.
@@ -96,17 +94,33 @@ impl<T, E> UnwrapExt for Result<T, E> {
     }
 }
 
-/// Extension trait to race heterogeneous futures.
-pub trait SelectEither {
-    /// Select Either the result of the first future (Left) or the result of the second future (Right), whichever is ready first.
-    #[allow(async_fn_in_trait)]
-    async fn select<T1, T2>(self, fut2: impl IntoFuture<Output = T2>) -> Either<T1, T2>
-    where
-        Self: Future<Output = T1> + Sized,
-    {
-        async { Either::Left(self.await) }
-            .or(async { Either::Right(fut2.await) })
-            .await
+#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogFut<'a, F> {
+    fut: F,
+    msg: &'a str,
+}
+impl<'a, F: Future> LogFut<'a, F> {
+    fn inner(self: Pin<&mut Self>) -> Pin<&mut F> {
+        // This is okay because `field` is pinned when `self` is.
+        unsafe { self.map_unchecked_mut(|s| &mut s.fut) }
+    }
+    pub fn into_parts(self) -> (F, &'a str) {
+        (self.fut, self.msg)
     }
 }
-impl<F: Future> SelectEither for F {}
+impl<'a, F: Future> Future for LogFut<'a, F> {
+    type Output = F::Output;
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        log::trace!("polled '{}'", self.msg);
+        self.inner().poll(cx)
+    }
+}
+pub trait LogFutExt: Future + Sized {
+    fn inspect(self, msg: &str) -> LogFut<Self> {
+        LogFut { fut: self, msg }
+    }
+}
+impl<F: Future> LogFutExt for F {}

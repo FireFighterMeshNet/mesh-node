@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
 #![feature(async_closure)] // async || syntax
-#![feature(ip_from)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -346,7 +345,7 @@ static STATE: Mutex<RefCell<NodeTable>> = Mutex::new(RefCell::new(NodeTable {
 static NEXT_PARENT: Signal<MACAddress> = Signal::new();
 
 /// Callback which updates mesh network tree state when called as part of the [`Sniffer`] callback
-pub fn sniffer_callback<S: Simulator>(data: &[u8]) {
+pub fn sniffer_callback<S: IO>(data: &[u8]) {
     // Return quick helps since this is called and blocks every packet.
     // Ignore non-beacon frames.
     let Ok(beacon) = ieee80211::match_frames!(data, beacon = BeaconFrame => { beacon }) else {
@@ -428,10 +427,7 @@ pub fn sniffer_callback<S: Simulator>(data: &[u8]) {
 }
 
 /// Periodic transmit of beacon with custom vendor data.
-pub(crate) async fn beacon_vendor_tx<S: Simulator>(
-    mut sniffer: S::Sniffer,
-    source_mac: MACAddress,
-) -> ! {
+pub(crate) async fn beacon_vendor_tx<S: IO>(mut sniffer: S::Sniffer, source_mac: MACAddress) -> ! {
     log::info!("sending vendor-beacons");
 
     // Buffer for beacon body
@@ -481,7 +477,7 @@ pub(crate) async fn beacon_vendor_tx<S: Simulator>(
 }
 
 /// Connects to new parent nodes if a better one is found.
-pub(crate) async fn connect_to_next_parent<S: Simulator>(
+pub(crate) async fn connect_to_next_parent<S: IO>(
     controller: &'static AsyncMutex<S::Controller>,
 ) -> ! {
     // Make sure to update state on disconnects.
@@ -548,18 +544,18 @@ pub(crate) async fn connect_to_next_parent<S: Simulator>(
 }
 
 /// Run all background tasks needed for the tree mesh
-pub async fn run<S: Simulator>(
+pub async fn run<S: IO>(
     sniffer: S::Sniffer,
     controller: &'static AsyncMutex<S::Controller>,
     ap_rx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
     ap_mac: MACAddress,
 ) -> ! {
-    use futures_lite::future::zip;
+    use embassy_futures::join::join;
     let future1 = beacon_vendor_tx::<S>(sniffer, ap_mac);
     let future2 = connect_to_next_parent::<S>(controller);
     let future3 = propagate_neighbors::propagate_neighbors::<S>(ap_rx_socket, sta_tx_socket);
     // Make sure to balance (binary tree) as more futures are added.
-    let res = zip(future1, zip(future2, future3)).await;
+    let res = join(future1, join(future2, future3)).await;
     res.0
 }
