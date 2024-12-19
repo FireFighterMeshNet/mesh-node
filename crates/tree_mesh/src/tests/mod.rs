@@ -24,6 +24,7 @@ mod arbitrary {
     use arbitrary::Unstructured;
     use common::LogFutExt;
     use core::{
+        cell::RefCell,
         future::Future,
         ops::AsyncFn,
         pin::{pin, Pin},
@@ -53,31 +54,51 @@ mod arbitrary {
     }
 
     struct SimulationEnv {
-        rng: RngUnstructured,
-        nodes: Vec<(
-            Node,
-            (Stack<'static>, TcpSocket<'static>),
-            (Stack<'static>, TcpSocket<'static>),
-        )>,
+        rng: RefCell<RngUnstructured>,
+        spawn: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
+        nodes: RefCell<
+            Vec<(
+                Node,
+                (Stack<'static>, TcpSocket<'static>),
+                (Stack<'static>, TcpSocket<'static>),
+            )>,
+        >,
         graph: Graph<(), (), petgraph::Undirected, usize>,
     }
     impl SimulationEnv {
         pub fn new(rng: RngUnstructured) -> Self {
             Self {
-                rng,
-                nodes: Vec::new(),
+                rng: RefCell::new(rng),
+                spawn: RefCell::new(Vec::new()),
+                nodes: RefCell::new(Vec::new()),
                 graph: Graph::default(),
             }
         }
     }
     impl core::fmt::Debug for SimulationEnv {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            struct VecLenDbg {
+                len: usize,
+            }
+            impl core::fmt::Debug for VecLenDbg {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.debug_struct("Vec")
+                        .field("len", &self.len)
+                        .finish_non_exhaustive()
+                }
+            }
+
+            let vec_dbg = VecLenDbg {
+                len: self.spawn.borrow().len(),
+            };
             f.debug_struct("SimulationEnv")
                 .field("rng", &self.rng)
+                .field("spawn", &vec_dbg)
                 .field(
                     "nodes",
-                    &self.nodes.iter().map(|x| &x.0).collect::<Vec<_>>(),
+                    &self.nodes.borrow().iter().map(|x| &x.0).collect::<Vec<_>>(),
                 )
+                .field("graph", &self.graph)
                 .finish()
         }
     }
@@ -106,19 +127,11 @@ mod arbitrary {
     }
 
     fn arbitrary_nodes(
-        spawn: &mut Vec<Pin<Box<dyn Future<Output = ()>>>>,
-        rng: &mut RngUnstructured,
+        env: &mut SimulationEnv,
         phy: Arc<Mutex<PhysicalChannel>>,
-    ) -> Result<
-        Vec<(
-            Node,
-            (Stack<'static>, TcpSocket<'static>),
-            (Stack<'static>, TcpSocket<'static>),
-        )>,
-        arbitrary::Error,
-    > {
-        let node_len = (2..=8).sample_single(rng);
-        let nodes = rng.with_unstructured(|u| {
+    ) -> Result<(), arbitrary::Error> {
+        let node_len = (2..=8).sample_single(&mut env.rng.get_mut());
+        let nodes = env.rng.get_mut().with_unstructured(|u| {
             core::iter::repeat_with(|| u.arbitrary::<Node>())
                 .take(node_len)
                 .collect::<Result<Vec<_>, _>>()
@@ -147,9 +160,11 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    rng.arbitrary()?,
+                    env.rng.get_mut().arbitrary()?,
                 );
-                spawn.push(Box::pin(async move { ap_runner.run().await }));
+                env.spawn
+                    .borrow_mut()
+                    .push(Box::pin(async move { ap_runner.run().await }));
                 let (sta_stack, mut sta_runner) = embassy_net::new(
                     MeshDevice::new({
                         let driver = TestDriver::new(node.mac, phy.clone());
@@ -162,9 +177,11 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    rng.arbitrary()?,
+                    env.rng.get_mut().arbitrary()?,
                 );
-                spawn.push(Box::pin(async move { sta_runner.run().await }));
+                env.spawn
+                    .borrow_mut()
+                    .push(Box::pin(async move { sta_runner.run().await }));
                 let ap_socket = TcpSocket::new(
                     ap_stack,
                     Box::leak(Box::new([0; { 2usize.pow(10) }])),
@@ -178,21 +195,28 @@ mod arbitrary {
                 Ok((node, (ap_stack, ap_socket), (sta_stack, sta_socket)))
             })
             .collect::<Result<Vec<_>, arbitrary::Error>>()?;
-        Ok(nodes)
+        *env.nodes.get_mut() = nodes;
+        Ok(())
     }
 
     /// Initialize connection graph into `env`.
     fn arbitrary_connection_graph(env: &mut SimulationEnv) {
-        let indices = 0..env.nodes.len();
-        while env.graph.node_count() < env.nodes.len() {
+        let indices = 0..env.nodes.borrow().len();
+        while env.graph.node_count() < env.nodes.borrow().len() {
             env.graph.add_node(());
         }
         // For each node.
         for i in indices.clone() {
             let other_indices = indices.clone().filter(|x| *x != i);
             // Add a random amount of edges to other nodes.
-            let mut neighbors = vec![0; other_indices.clone().choose(&mut env.rng).unwrap()];
-            other_indices.choose_multiple_fill(&mut env.rng, &mut neighbors);
+            let mut neighbors = vec![
+                0;
+                other_indices
+                    .clone()
+                    .choose(&mut env.rng.get_mut())
+                    .unwrap()
+            ];
+            other_indices.choose_multiple_fill(&mut env.rng.get_mut(), &mut neighbors);
             // To other nodes.
             for j in neighbors {
                 env.graph.add_edge(i.into(), j.into(), ());
@@ -202,7 +226,7 @@ mod arbitrary {
 
     async fn run_sim_test(
         rng: &mut RngUnstructured,
-        sim: impl AsyncFn(&mut SimulationEnv) -> Result<(), WifiError>,
+        sim: impl AsyncFn(&SimulationEnv) -> Result<(), WifiError>,
     ) -> arbitrary::Result<()> {
         let phy = Arc::new(Mutex::new(PhysicalChannel {
             in_air: BinaryHeap::new(),
@@ -216,20 +240,18 @@ mod arbitrary {
             panic_on_deadlock();
         });
 
-        let mut spawn = Vec::new();
-        let nodes = arbitrary_nodes(&mut spawn, rng, phy.clone())?;
         let mut env = SimulationEnv::new(rng.clone());
-        env.nodes = nodes;
+        arbitrary_nodes(&mut env, phy.clone())?;
         arbitrary_connection_graph(&mut env);
 
         let (waker, count) = futures_test::task::new_count_waker();
         let mut prev_count = count.get();
         let res = {
-            let mut fut = pin!(sim(&mut env));
+            let mut fut = pin!(sim(&env));
             loop {
                 // Poll spawned tasks.
-                if count.get() > prev_count || count.get() < spawn.len() {
-                    for fut in &mut spawn {
+                if count.get() > prev_count || count.get() < env.spawn.borrow().len() {
+                    for fut in env.spawn.borrow_mut().iter_mut() {
                         assert!(fut
                             .as_mut()
                             .poll(&mut Context::from_waker(&waker))
@@ -264,7 +286,7 @@ mod arbitrary {
         };
         match res {
             Ok(()) => {
-                if env.rng.is_exhausted() {
+                if env.rng.borrow().is_exhausted() {
                     Err(arbitrary::Error::NotEnoughData)
                 } else {
                     Ok(())
@@ -279,14 +301,15 @@ mod arbitrary {
     fn deterministic_simulation_test() {
         setup();
 
-        async fn sim(env: &mut SimulationEnv) -> Result<(), WifiError> {
-            let max_iters: u8 = env.rng.gen_range(1..=u8::MAX);
+        async fn sim(env: &SimulationEnv) -> Result<(), WifiError> {
+            let max_iters: u8 = env.rng.borrow_mut().gen_range(1..=u8::MAX);
             let mut iter = 0u16;
             // Test communicate between nodes.
             loop {
                 let [idx1, idx2] = {
                     let mut out = [0, 0];
-                    (0..env.nodes.len()).choose_multiple_fill(&mut env.rng, &mut out);
+                    (0..env.nodes.borrow().len())
+                        .choose_multiple_fill(&mut *env.rng.borrow_mut(), &mut out);
                     out
                 };
                 if iter > max_iters as u16 {
@@ -295,8 +318,10 @@ mod arbitrary {
                 iter += 1;
 
                 // Connect node.
-                let addr = crate::consts::sta_cidr_from_mac(env.nodes[idx2].0.mac.into()).address();
-                let (node1, node2) = get_two_mut(&mut env.nodes, idx1, idx2).unwrap();
+                let addr = crate::consts::sta_cidr_from_mac(env.nodes.borrow()[idx2].0.mac.into())
+                    .address();
+                let mut nodes = env.nodes.borrow_mut();
+                let (node1, node2) = get_two_mut(&mut nodes, idx1, idx2).unwrap();
 
                 // TODO crate::run(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac)
                 let (r1, r2) = join(
@@ -333,7 +358,8 @@ mod arbitrary {
                 dbg!(r2.unwrap());
 
                 // Send some random data.
-                let res = env.nodes[idx1].1 .1.write_all(env.rng.arbitrary()?).await;
+                let data: [u8; 2048] = env.rng.borrow_mut().arbitrary()?;
+                let res = env.nodes.borrow_mut()[idx1].1 .1.write_all(&data).await;
                 _ = dbg!(res);
             }
 
