@@ -1,10 +1,13 @@
-use crate::simulator::{Event, GetMac, Sniffer};
-use arbitrary::Unstructured;
+use crate::{
+    simulator::{Event, GetMac, Sniffer},
+    tests::arbitrary_rng::RngUnstructured,
+};
 use core::task::Waker;
 use critical_section::CriticalSection;
 use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
 use parking_lot::Mutex;
+use rand::Rng;
 use std::{
     collections::{BinaryHeap, VecDeque},
     sync::Arc,
@@ -24,7 +27,7 @@ type Shared<T> = Arc<Mutex<T>>;
 #[derive(Debug)]
 pub struct PhysicalChannel {
     pub in_air: BinaryHeap<Message>,
-    pub u: Unstructured<'static>,
+    pub rng: RngUnstructured,
     // Message rx_queue for connected nodes.
     pub connected: Vec<Shared<(Option<Waker>, VecDeque<Message>)>>,
 }
@@ -63,7 +66,8 @@ impl PhysicalChannel {
         // Deliver (flood) to all connected.
         for rx in &self.connected {
             // Randomly (deterministically) drop messages to some nodes.
-            if self.u.arbitrary().unwrap_or_default() {
+            if self.rng.gen() {
+                log::debug!("dropped pkt");
                 continue;
             }
             let mut rx = rx.lock();

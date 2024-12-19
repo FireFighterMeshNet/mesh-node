@@ -1,3 +1,4 @@
+mod arbitrary_rng;
 mod time;
 
 pub fn get_two_mut<T>(slice: &mut [T], idx1: usize, idx2: usize) -> Option<(&mut T, &mut T)> {
@@ -18,12 +19,13 @@ pub fn get_two_mut<T>(slice: &mut [T], idx1: usize, idx2: usize) -> Option<(&mut
 mod arbitrary {
     mod imp;
 
-    use super::time::MockDriver;
+    use super::{arbitrary_rng::RngUnstructured, time::MockDriver};
     use crate::{device::MeshDevice, tests::get_two_mut};
     use arbitrary::Unstructured;
     use common::LogFutExt;
     use core::{
         future::Future,
+        ops::AsyncFn,
         pin::{pin, Pin},
         task::Context,
     };
@@ -34,6 +36,7 @@ mod arbitrary {
     use embedded_io_async::Write;
     use imp::{PhysicalChannel, TestDriver, WifiError};
     use parking_lot::Mutex;
+    use rand::Rng;
     use std::{collections::BinaryHeap, sync::Arc, thread};
 
     #[derive(Debug)]
@@ -45,6 +48,26 @@ mod arbitrary {
             let mut mac: [u8; 6] = u.arbitrary()?;
             mac[0] &= !1; // don't make multicast address
             Ok(Self { mac })
+        }
+    }
+
+    struct SimulationEnv {
+        rng: RngUnstructured,
+        nodes: Vec<(
+            Node,
+            (Stack<'static>, TcpSocket<'static>),
+            (Stack<'static>, TcpSocket<'static>),
+        )>,
+    }
+    impl core::fmt::Debug for SimulationEnv {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("SimulationEnv")
+                .field("rng", &self.rng)
+                .field(
+                    "nodes",
+                    &self.nodes.iter().map(|x| &x.0).collect::<Vec<_>>(),
+                )
+                .finish()
         }
     }
 
@@ -73,7 +96,7 @@ mod arbitrary {
 
     fn arbitrary_nodes(
         spawn: &mut Vec<Pin<Box<dyn Future<Output = ()>>>>,
-        u: &mut Unstructured,
+        rng: &mut RngUnstructured,
         phy: Arc<Mutex<PhysicalChannel>>,
     ) -> Result<
         Vec<(
@@ -83,7 +106,7 @@ mod arbitrary {
         )>,
         arbitrary::Error,
     > {
-        let nodes = {
+        let nodes = rng.with_unstructured(|u| {
             // at least 2 nodes
             let mut out = std::iter::repeat_with(|| u.arbitrary())
                 .take(2)
@@ -91,8 +114,8 @@ mod arbitrary {
             // no more than 8 nodes
             out.extend(u.arbitrary_iter::<Node>()?.take(6));
             // remove errors
-            out.into_iter().collect::<Result<Vec<_>, _>>()?
-        };
+            out.into_iter().collect::<Result<Vec<_>, _>>()
+        })?;
 
         let nodes = nodes
             .into_iter()
@@ -109,7 +132,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    u.arbitrary()?,
+                    rng.arbitrary()?,
                 );
                 spawn.push(Box::pin(async move { ap_runner.run().await }));
                 let (sta_stack, mut sta_runner) = embassy_net::new(
@@ -124,7 +147,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    u.arbitrary()?,
+                    rng.arbitrary()?,
                 );
                 spawn.push(Box::pin(async move { sta_runner.run().await }));
                 let ap_socket = TcpSocket::new(
@@ -143,25 +166,13 @@ mod arbitrary {
         Ok(nodes)
     }
 
-    async fn run_sim_test<
-        Fut: Future<Output = Result<(), WifiError>>,
-        SimTest: Fn(
-            arbitrary::Unstructured<'static>,
-            Vec<(
-                Node,
-                (Stack<'static>, TcpSocket<'static>),
-                (Stack<'static>, TcpSocket<'static>),
-            )>,
-        ) -> Fut,
-    >(
-        u: &mut arbitrary::Unstructured<'_>,
-        sim: SimTest,
+    async fn run_sim_test(
+        rng: &mut RngUnstructured,
+        sim: impl AsyncFn(&mut SimulationEnv) -> Result<(), WifiError>,
     ) -> arbitrary::Result<()> {
-        let data: &'static [u8] = u.bytes(u.len()).unwrap().to_owned().leak();
-        let mut u = Unstructured::new(data);
         let phy = Arc::new(Mutex::new(PhysicalChannel {
             in_air: BinaryHeap::new(),
-            u: Unstructured::new(u.peek_bytes(u.len()).unwrap()),
+            rng: rng.clone(),
             connected: Vec::new(),
         }));
 
@@ -172,47 +183,59 @@ mod arbitrary {
         });
 
         let mut spawn = Vec::new();
-        let nodes = arbitrary_nodes(&mut spawn, &mut u, phy.clone())?;
-        let mut fut = pin!(sim(u, nodes));
+        let nodes = arbitrary_nodes(&mut spawn, rng, phy.clone())?;
+        let mut env = SimulationEnv {
+            rng: rng.clone(),
+            nodes,
+        };
         let (waker, count) = futures_test::task::new_count_waker();
         let mut prev_count = count.get();
-        let res = loop {
-            // Poll spawned tasks.
-            // TODO these should work when only polled if woke, but don't for some reason.
-            // perhaps the tx, rx wakers aren't being woken by the [`TestDriver`]?
-            for fut in &mut spawn {
-                assert!(fut
-                    .as_mut()
-                    .poll(&mut Context::from_waker(&waker))
-                    .is_pending());
-            }
-
-            // Poll if woke.
-            if count.get() > prev_count || count.get() == 0 {
-                // Poll actual test
-                match fut.as_mut().poll(&mut Context::from_waker(&waker)) {
-                    core::task::Poll::Ready(x) => break x,
-                    core::task::Poll::Pending => (),
+        let res = {
+            let mut fut = pin!(sim(&mut env));
+            loop {
+                // Poll spawned tasks.
+                if count.get() > prev_count || count.get() < spawn.len() {
+                    for fut in &mut spawn {
+                        assert!(fut
+                            .as_mut()
+                            .poll(&mut Context::from_waker(&waker))
+                            .is_pending());
+                    }
                 }
+
+                // Poll if woke.
+                if count.get() > prev_count || count.get() == 0 {
+                    // Poll actual test
+                    match fut.as_mut().poll(&mut Context::from_waker(&waker)) {
+                        core::task::Poll::Ready(x) => break x,
+                        core::task::Poll::Pending => (),
+                    }
+                }
+
+                let no_alarms = !MockDriver::get().alarm_pending();
+                let no_in_flight_msgs = phy.lock().in_air.is_empty();
+                let no_new_wakes = count.get() == prev_count;
+                // If nothing will happen again then break.
+                if no_alarms && no_in_flight_msgs && no_new_wakes {
+                    break Ok(());
+                }
+
+                prev_count = count.get();
+
+                // Poll the simulation to move forward time and deliver messages from physical channel.
+                let now = embassy_time::Instant::now();
+                phy.lock().poll(now.as_ticks());
+                MockDriver::get().advance(embassy_time::Duration::from_millis(1));
             }
-
-            let no_alarms = !MockDriver::get().alarm_pending();
-            let no_in_flight_msgs = phy.lock().in_air.is_empty();
-            let no_new_wakes = count.get() == prev_count;
-            // If nothing will happen again then break.
-            if no_alarms && no_in_flight_msgs && no_new_wakes {
-                break Ok(());
-            }
-
-            prev_count = count.get();
-
-            // Poll the simulation to move forward time and deliver messages from physical channel.
-            let now = embassy_time::Instant::now();
-            phy.lock().poll(now.as_ticks());
-            MockDriver::get().advance(embassy_time::Duration::from_millis(1));
         };
         match res {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if env.rng.is_exhausted() {
+                    Err(arbitrary::Error::NotEnoughData)
+                } else {
+                    Ok(())
+                }
+            }
             Err(WifiError::Arbitrary(e)) => Err(e),
         }
     }
@@ -222,22 +245,16 @@ mod arbitrary {
     fn deterministic_simulation_test() {
         setup();
 
-        async fn sim(
-            mut u: arbitrary::Unstructured<'static>,
-            mut nodes: Vec<(
-                Node,
-                (Stack<'static>, TcpSocket<'static>),
-                (Stack<'static>, TcpSocket<'static>),
-            )>,
-        ) -> Result<(), WifiError> {
-            let nodes_len = nodes.len();
-            let max_iters: u8 = u.int_in_range(1..=u8::MAX)?;
+        async fn sim(env: &mut SimulationEnv) -> Result<(), WifiError> {
+            let nodes_len = env.nodes.len();
+            let max_iters: u8 = env.rng.gen_range(1..=u8::MAX);
             let mut iter = 0u16;
             // Test communicate between nodes.
-            while let (Ok(idx1), Ok(idx2)) = (
-                u.int_in_range(0..=nodes_len - 1),
-                u.int_in_range(0..=nodes_len - 1),
-            ) {
+            loop {
+                let (idx1, idx2) = (
+                    env.rng.gen_range(0..nodes_len),
+                    env.rng.gen_range(0..nodes_len),
+                );
                 if iter > max_iters as u16 {
                     break;
                 }
@@ -249,8 +266,8 @@ mod arbitrary {
                 }
 
                 // Connect node.
-                let addr = crate::consts::sta_cidr_from_mac(nodes[idx2].0.mac.into()).address();
-                let (node1, node2) = get_two_mut(&mut nodes, idx1, idx2).unwrap();
+                let addr = crate::consts::sta_cidr_from_mac(env.nodes[idx2].0.mac.into()).address();
+                let (node1, node2) = get_two_mut(&mut env.nodes, idx1, idx2).unwrap();
 
                 // TODO crate::run(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac)
                 let (r1, r2) = join(
@@ -287,15 +304,17 @@ mod arbitrary {
                 dbg!(r2.unwrap());
 
                 // Send some random data.
-                let res = nodes[idx1].1 .1.write_all(u.arbitrary()?).await;
+                let res = env.nodes[idx1].1 .1.write_all(env.rng.arbitrary()?).await;
                 _ = dbg!(res);
             }
 
             Ok(())
         }
 
-        arbtest::arbtest(|u| embassy_futures::block_on(run_sim_test(u, sim)))
-            .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
-            .run();
+        arbtest::arbtest(|u| {
+            embassy_futures::block_on(run_sim_test(&mut RngUnstructured::from(u), sim))
+        })
+        .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
+        .run();
     }
 }
