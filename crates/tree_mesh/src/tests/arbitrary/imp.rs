@@ -118,7 +118,9 @@ impl RxToken for TestRxToken {
         F: FnOnce(&mut [u8]) -> R,
     {
         let mut msg = self.msgs.lock().1.pop_front().unwrap();
-        println!("rxed: {msg:0>2X?}");
+        let log_msg = format!("rxed: {:0>2X?}", msg.data);
+        let log_msg = log_msg.replace(",", "");
+        println!("{log_msg}");
         f(&mut msg.data)
     }
 }
@@ -132,7 +134,9 @@ impl TxToken for TestTxToken {
     {
         let mut data = vec![0; len];
         let res = f(&mut data);
-        println!("txed: {data:0>2X?}");
+        let log_msg = format!("txed: {data:0>2X?}");
+        let log_msg = log_msg.replace(",", "");
+        println!("{log_msg}");
         self.phy.lock().tx(data.into()).unwrap();
         res
     }

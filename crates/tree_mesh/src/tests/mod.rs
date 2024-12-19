@@ -36,10 +36,11 @@ mod arbitrary {
     use embedded_io_async::Write;
     use imp::{PhysicalChannel, TestDriver, WifiError};
     use parking_lot::Mutex;
-    use rand::Rng;
+    use petgraph::Graph;
+    use rand::{distributions::uniform::SampleRange, seq::IteratorRandom, Rng};
     use std::{collections::BinaryHeap, sync::Arc, thread};
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq)]
     struct Node {
         mac: [u8; 6],
     }
@@ -58,6 +59,16 @@ mod arbitrary {
             (Stack<'static>, TcpSocket<'static>),
             (Stack<'static>, TcpSocket<'static>),
         )>,
+        graph: Graph<(), (), petgraph::Undirected, usize>,
+    }
+    impl SimulationEnv {
+        pub fn new(rng: RngUnstructured) -> Self {
+            Self {
+                rng,
+                nodes: Vec::new(),
+                graph: Graph::default(),
+            }
+        }
     }
     impl core::fmt::Debug for SimulationEnv {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -106,16 +117,20 @@ mod arbitrary {
         )>,
         arbitrary::Error,
     > {
+        let node_len = (2..=8).sample_single(rng);
         let nodes = rng.with_unstructured(|u| {
-            // at least 2 nodes
-            let mut out = std::iter::repeat_with(|| u.arbitrary())
-                .take(2)
-                .collect::<Vec<_>>();
-            // no more than 8 nodes
-            out.extend(u.arbitrary_iter::<Node>()?.take(6));
-            // remove errors
-            out.into_iter().collect::<Result<Vec<_>, _>>()
+            core::iter::repeat_with(|| u.arbitrary::<Node>())
+                .take(node_len)
+                .collect::<Result<Vec<_>, _>>()
         })?;
+        // All nodes should be different.
+        for i in 0..nodes.len() {
+            for j in 0..nodes.len() {
+                if i != j {
+                    assert_ne!(nodes[i].mac, nodes[j].mac)
+                }
+            }
+        }
 
         let nodes = nodes
             .into_iter()
@@ -166,6 +181,25 @@ mod arbitrary {
         Ok(nodes)
     }
 
+    /// Initialize connection graph into `env`.
+    fn arbitrary_connection_graph(env: &mut SimulationEnv) {
+        let indices = 0..env.nodes.len();
+        while env.graph.node_count() < env.nodes.len() {
+            env.graph.add_node(());
+        }
+        // For each node.
+        for i in indices.clone() {
+            let other_indices = indices.clone().filter(|x| *x != i);
+            // Add a random amount of edges to other nodes.
+            let mut neighbors = vec![0; other_indices.clone().choose(&mut env.rng).unwrap()];
+            other_indices.choose_multiple_fill(&mut env.rng, &mut neighbors);
+            // To other nodes.
+            for j in neighbors {
+                env.graph.add_edge(i.into(), j.into(), ());
+            }
+        }
+    }
+
     async fn run_sim_test(
         rng: &mut RngUnstructured,
         sim: impl AsyncFn(&mut SimulationEnv) -> Result<(), WifiError>,
@@ -184,10 +218,10 @@ mod arbitrary {
 
         let mut spawn = Vec::new();
         let nodes = arbitrary_nodes(&mut spawn, rng, phy.clone())?;
-        let mut env = SimulationEnv {
-            rng: rng.clone(),
-            nodes,
-        };
+        let mut env = SimulationEnv::new(rng.clone());
+        env.nodes = nodes;
+        arbitrary_connection_graph(&mut env);
+
         let (waker, count) = futures_test::task::new_count_waker();
         let mut prev_count = count.get();
         let res = {
@@ -246,24 +280,19 @@ mod arbitrary {
         setup();
 
         async fn sim(env: &mut SimulationEnv) -> Result<(), WifiError> {
-            let nodes_len = env.nodes.len();
             let max_iters: u8 = env.rng.gen_range(1..=u8::MAX);
             let mut iter = 0u16;
             // Test communicate between nodes.
             loop {
-                let (idx1, idx2) = (
-                    env.rng.gen_range(0..nodes_len),
-                    env.rng.gen_range(0..nodes_len),
-                );
+                let [idx1, idx2] = {
+                    let mut out = [0, 0];
+                    (0..env.nodes.len()).choose_multiple_fill(&mut env.rng, &mut out);
+                    out
+                };
                 if iter > max_iters as u16 {
                     break;
                 }
                 iter += 1;
-                if idx1 == idx2 {
-                    // TODO connect to self instead of reselecting.
-                    iter -= 1;
-                    continue;
-                }
 
                 // Connect node.
                 let addr = crate::consts::sta_cidr_from_mac(env.nodes[idx2].0.mac.into()).address();

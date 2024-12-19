@@ -11,20 +11,6 @@ impl<T: RxTokenEmbassy> RxTokenEmbassy for RxToken<T> {
             let res = f(buf);
             let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
             let frame = EthernetRepr::parse(&frame).unwrap();
-            // TODO remove. dbg
-            match frame {
-                tmp => {
-                    log::info!(
-                        "[{}:{}:{}] {} = {:?}",
-                        core::file!(),
-                        core::line!(),
-                        core::column!(),
-                        core::stringify!(frame),
-                        &tmp,
-                    );
-                    tmp
-                }
-            };
             let _ = frame;
             res
         })
@@ -41,20 +27,6 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
             let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
             let payload = frame.payload();
             let frame = EthernetRepr::parse(&frame).unwrap();
-            // TODO: remove. dbg
-            match &frame {
-                tmp => {
-                    log::info!(
-                        "[{}:{}:{}] {} = {:?}",
-                        core::file!(),
-                        core::line!(),
-                        core::column!(),
-                        core::stringify!(&frame),
-                        &tmp
-                    );
-                    tmp
-                }
-            };
             match frame.ethertype {
                 smoltcp::wire::EthernetProtocol::Ipv6 => {
                     let ipv6 = smoltcp::wire::Ipv6Packet::new_unchecked(&*payload);
