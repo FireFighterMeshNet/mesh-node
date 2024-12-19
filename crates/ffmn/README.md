@@ -40,4 +40,4 @@ See the `build.rs` for details.
 # Troubleshooting
 - Stack overflow hangs instead of crashing and restarting even with watchdog enabled.
     - <https://github.com/espressif/esp-idf/issues/10110>
-- If you get a ``linking with `xtensa-esp32-elf-gcc` failed ... undefined reference to ...`` then you likely need to enable a feature in the corresponding crate to provide the function (e.g. `_embassy_time_schedule_wake` comes from `generic-queue` in `embassy-time`)
+- If you get a ``linking with `xtensa-esp32-elf-gcc` failed ... undefined reference to ...`` then you likely need to enable a feature in the corresponding crate to provide the function (e.g. `_embassy_time_schedule_wake` comes from `generic-queue` in `embassy-time` or `integrated-timers` in `embassy-executor`)

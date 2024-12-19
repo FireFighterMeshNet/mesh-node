@@ -100,7 +100,6 @@ impl Sniffer for TestSniffer {
 error_set::error_set!(
     WifiError = {
         Arbitrary(arbitrary::Error),
-        Panic,
     };
 );
 
