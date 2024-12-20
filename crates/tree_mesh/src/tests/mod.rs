@@ -11,7 +11,7 @@ pub fn get_two_mut<T>(slice: &mut [T], idx1: usize, idx2: usize) -> Option<(&mut
         Some((&mut left[idx1], &mut right[0]))
     } else {
         let (left, right) = slice.split_at_mut(idx1);
-        Some((&mut left[idx2], &mut right[0]))
+        Some((&mut right[0], &mut left[idx2]))
     }
 }
 
@@ -327,7 +327,7 @@ mod arbitrary {
                 let (r1, r2) = join(
                     async {
                         let r = node2
-                            .1
+                            .2
                              .1
                             .accept(IpListenEndpoint {
                                 addr: None,
@@ -340,7 +340,7 @@ mod arbitrary {
                     },
                     async {
                         let r = node1
-                            .1
+                            .2
                              .1
                             .connect(IpEndpoint {
                                 addr: dbg!(addr.into()),
