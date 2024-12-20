@@ -57,7 +57,7 @@ impl Sniffer for SnifferWrapper {
     }
 }
 
-/// Implementation of [`tree_mesh::simulator::Simulator`] for esp devices.
+/// Implementation of [`tree_mesh::simulator::IO`] for esp devices.
 pub struct EspIO;
 impl tree_mesh::simulator::IO for EspIO {
     /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>

@@ -494,7 +494,7 @@ mod arbitrary {
             let start = rng.borrow().len();
             let res = embassy_futures::block_on(run_sim_test(rng.clone(), sim));
             let end = rng.borrow().len();
-            log::trace!("test completed using {} entropy", start - end);
+            log::trace!("test completed using {}/{} entropy", start - end, start);
             res
         })
         .size_min(256)
