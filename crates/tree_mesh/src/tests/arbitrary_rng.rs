@@ -27,8 +27,12 @@ impl RngUnstructured {
     pub const fn new(value: Vec<u8>) -> Self {
         Self(value)
     }
+    /// Entropy left.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
     /// No entropy left.
-    pub fn is_exhausted(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
     pub fn into_inner(self) -> Vec<u8> {

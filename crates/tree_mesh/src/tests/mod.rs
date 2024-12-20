@@ -47,9 +47,37 @@ mod arbitrary {
     }
     impl arbitrary::Arbitrary<'_> for Node {
         fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            // Keep track of previous macs to avoid generating the same one twice.
+            static PREV: Mutex<Vec<[u8; 6]>> = Mutex::new(Vec::new());
+            let mut prev = PREV.lock();
+
+            // Start at random mac.
             let mut mac: [u8; 6] = u.arbitrary()?;
-            mac[0] &= !1; // don't make multicast address
+            // Note: Don't use entropy in the loop.
+            let mac = loop {
+                // Don't make multicast/broadcast address
+                mac[0] &= !1;
+                // Don't make all zero
+                mac[1] |= 1;
+
+                // Make sure the mac is unique. If it isn't, increment and check again.
+                if prev.contains(&mac) {
+                    let mut bytes = [0; 8];
+                    bytes[0..6].copy_from_slice(&mac);
+                    let mut x = u64::from_le_bytes(bytes);
+                    // prime number > 2 to avoid getting stuck in loop where above increases/decreases by power of 2 then this adds the amount back.
+                    x = x.wrapping_add(3);
+                    mac = x.to_le_bytes()[0..6].try_into().unwrap();
+                    continue;
+                } else {
+                    break mac;
+                }
+            };
+            prev.push(mac);
             Ok(Self { mac })
+        }
+        fn size_hint(depth: usize) -> (usize, Option<usize>) {
+            <[u8; 6] as Arbitrary>::size_hint(depth)
         }
     }
 
@@ -285,13 +313,7 @@ mod arbitrary {
             }
         };
         match res {
-            Ok(()) => {
-                if env.rng.borrow().is_exhausted() {
-                    Err(arbitrary::Error::NotEnoughData)
-                } else {
-                    Ok(())
-                }
-            }
+            Ok(()) => Ok(()),
             Err(WifiError::Arbitrary(e)) => Err(e),
         }
     }
@@ -367,9 +389,15 @@ mod arbitrary {
         }
 
         arbtest::arbtest(|u| {
-            embassy_futures::block_on(run_sim_test(&mut RngUnstructured::from(u), sim))
+            let rng = Rc::new(RefCell::new(RngUnstructured::from(u)));
+            let start = rng.borrow().len();
+            let res = embassy_futures::block_on(run_sim_test(rng.clone(), sim));
+            let end = rng.borrow().len();
+            log::trace!("test completed using {} entropy", start - end);
+            res
         })
-        .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
+        .size_min(256)
+        // .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
         .run();
     }
 }
