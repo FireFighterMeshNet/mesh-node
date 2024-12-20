@@ -3,11 +3,9 @@ use core::{cell::RefCell, task::Waker};
 use critical_section::CriticalSection;
 use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
-use parking_lot::Mutex;
 use std::{
     collections::{BinaryHeap, VecDeque},
     rc::Rc,
-    sync::Arc,
 };
 
 /// Messages sorted by delivery time.
@@ -17,7 +15,7 @@ pub struct Message {
     pub data: Box<[u8]>,
 }
 
-type Shared<T> = Arc<Mutex<T>>;
+type Shared<T> = Rc<RefCell<T>>;
 
 /// Priority queue of messages to deliver after a delay.
 /// Simulates the physical channel.
@@ -51,9 +49,9 @@ impl PhysicalChannel {
 
         // Add to both rx interfaces of `to` node.
         let mut drivers = (to_driver.0 .0.borrow_mut(), to_driver.1 .0.borrow_mut());
-        drivers.0.rx_queue.lock().push_back(msg.clone());
+        drivers.0.rx_queue.borrow_mut().push_back(msg.clone());
         drivers.0.rx_waker.take().map(Waker::wake);
-        drivers.1.rx_queue.lock().push_back(msg.clone());
+        drivers.1.rx_queue.borrow_mut().push_back(msg.clone());
         drivers.1.rx_waker.take().map(Waker::wake);
     }
 }
@@ -95,7 +93,7 @@ impl RxToken for TestRxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut msg = self.rx_queue.lock().pop_front().unwrap();
+        let mut msg = self.rx_queue.borrow_mut().pop_front().unwrap();
         let log_msg = format!("rxed: {:0>2X?}", msg.data);
         let log_msg = log_msg.replace(",", "");
         let stderr = std::io::stderr().lock();
@@ -119,7 +117,7 @@ impl TxToken for TestTxToken {
         let stderr = std::io::stderr().lock();
         println!("{log_msg}");
         drop(stderr);
-        self.tx_queue.lock().push_back(data);
+        self.tx_queue.borrow_mut().push_back(data);
         res
     }
 }
@@ -134,8 +132,8 @@ impl TestDriver {
     pub fn new(mac: [u8; 6]) -> Self {
         Self {
             mac,
-            tx_queue: Arc::new(Mutex::new(VecDeque::new())),
-            rx_queue: Arc::new(Mutex::new(VecDeque::new())),
+            tx_queue: Rc::new(RefCell::new(VecDeque::new())),
+            rx_queue: Rc::new(RefCell::new(VecDeque::new())),
             rx_waker: None,
         }
     }
@@ -145,7 +143,7 @@ impl TestDriver {
         })
     }
     pub fn rx_tok(&mut self) -> Result<Option<(TestRxToken, TestTxToken)>, WifiError> {
-        if self.rx_queue.lock().is_empty() {
+        if self.rx_queue.borrow_mut().is_empty() {
             return Ok(None);
         }
         Ok(Some((

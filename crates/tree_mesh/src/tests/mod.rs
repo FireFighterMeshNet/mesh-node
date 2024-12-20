@@ -81,6 +81,8 @@ mod arbitrary {
         }
     }
 
+    /// Holding a mutable borrow to any `RefCells` in this structure, other than `nodes`, across an await point in the simulation will panic.
+    /// This should be fine for the simulation, since the only thing it should need to await is the `TcpSockets` for IO operations.
     struct SimulationEnv {
         rng: Rc<RefCell<RngUnstructured>>,
         spawn: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
@@ -359,8 +361,20 @@ mod arbitrary {
                 let now = embassy_time::Instant::now();
                 for i in 0..env.node_len {
                     let data = match (
-                        env.drivers[i].0 .0.borrow_mut().tx_queue.lock().pop_front(),
-                        env.drivers[i].1 .0.borrow_mut().tx_queue.lock().pop_front(),
+                        env.drivers[i]
+                            .0
+                             .0
+                            .borrow_mut()
+                            .tx_queue
+                            .borrow_mut()
+                            .pop_front(),
+                        env.drivers[i]
+                            .1
+                             .0
+                            .borrow_mut()
+                            .tx_queue
+                            .borrow_mut()
+                            .pop_front(),
                     ) {
                         (_, Some(x)) => x,
                         (Some(x), _) => x,

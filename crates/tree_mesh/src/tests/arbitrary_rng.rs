@@ -4,7 +4,7 @@ use rand::RngCore;
 /// Adapter from [`Unstructured`] to [`RngCore`] traits.
 /// Uses defaults for rng traits.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RngUnstructured(Vec<u8>);
+pub struct RngUnstructured(pub Vec<u8>);
 impl RngUnstructured {
     pub fn with_unstructured<R, F: FnOnce(&mut Unstructured<'_>) -> R>(&mut self, f: F) -> R {
         let mut u = Unstructured::new(self.0.as_slice());
@@ -24,9 +24,6 @@ impl RngUnstructured {
     }
 }
 impl RngUnstructured {
-    pub const fn new(value: Vec<u8>) -> Self {
-        Self(value)
-    }
     /// Entropy left.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -34,9 +31,6 @@ impl RngUnstructured {
     /// No entropy left.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-    pub fn into_inner(self) -> Vec<u8> {
-        self.0
     }
 }
 impl From<&mut Unstructured<'_>> for RngUnstructured {
