@@ -463,13 +463,12 @@ mod arbitrary {
                     },
                 )
                 .await;
-                panic!("TODO");
                 dbg!(r1.unwrap());
                 dbg!(r2.unwrap());
 
                 // Send some random data.
                 let data: [u8; 2048] = env.rng.borrow_mut().arbitrary()?;
-                let res = env.nodes.borrow_mut()[idx1].1 .1.write_all(&data).await;
+                let res = nodes[idx1].2 .1.write_all(&data).await;
                 _ = dbg!(res);
             }
 
