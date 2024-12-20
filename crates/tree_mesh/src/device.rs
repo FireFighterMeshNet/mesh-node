@@ -57,6 +57,7 @@ impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
 }
 
 /// A device which enables running an overlay network over an unreliable mesh network.
+#[derive(Debug, Clone)]
 pub struct MeshDevice<D> {
     inner: D,
 }

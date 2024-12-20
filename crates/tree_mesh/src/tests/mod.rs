@@ -21,7 +21,7 @@ mod arbitrary {
 
     use super::{arbitrary_rng::RngUnstructured, time::MockDriver};
     use crate::{device::MeshDevice, tests::get_two_mut};
-    use arbitrary::Unstructured;
+    use arbitrary::{Arbitrary, Unstructured};
     use common::LogFutExt;
     use core::{
         cell::RefCell,
@@ -35,13 +35,13 @@ mod arbitrary {
         tcp::TcpSocket, IpEndpoint, IpListenEndpoint, Stack, StackResources, StaticConfigV6,
     };
     use embedded_io_async::Write;
-    use imp::{PhysicalChannel, TestDriver, WifiError};
+    use imp::{Message, PhysicalChannel, SharedTestDriver, TestDriver, WifiError};
     use parking_lot::Mutex;
-    use petgraph::Graph;
+    use petgraph::{visit::EdgeRef, Graph};
     use rand::{distributions::uniform::SampleRange, seq::IteratorRandom, Rng};
-    use std::{collections::BinaryHeap, sync::Arc, thread};
+    use std::{rc::Rc, thread};
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct Node {
         mac: [u8; 6],
     }
@@ -82,7 +82,7 @@ mod arbitrary {
     }
 
     struct SimulationEnv {
-        rng: RefCell<RngUnstructured>,
+        rng: Rc<RefCell<RngUnstructured>>,
         spawn: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
         nodes: RefCell<
             Vec<(
@@ -91,15 +91,22 @@ mod arbitrary {
                 (Stack<'static>, TcpSocket<'static>),
             )>,
         >,
-        graph: Graph<(), (), petgraph::Undirected, usize>,
+        // (ap, sta)
+        drivers: Vec<(SharedTestDriver, SharedTestDriver)>,
+        // Graph connects each interface. Though it is `petgraph::Directed` an edge is added in both directions for all edges.
+        // This way the edge_weights can be a delaying physical channel with a clear target and source.
+        graph: RefCell<Graph<(), PhysicalChannel, petgraph::Directed, usize>>,
+        node_len: usize,
     }
     impl SimulationEnv {
-        pub fn new(rng: RngUnstructured) -> Self {
+        pub fn new(rng: Rc<RefCell<RngUnstructured>>) -> Self {
             Self {
-                rng: RefCell::new(rng),
+                rng,
                 spawn: RefCell::new(Vec::new()),
                 nodes: RefCell::new(Vec::new()),
-                graph: Graph::default(),
+                drivers: Vec::new(),
+                graph: RefCell::new(Graph::default()),
+                node_len: 0,
             }
         }
     }
@@ -115,18 +122,34 @@ mod arbitrary {
                         .finish_non_exhaustive()
                 }
             }
+            struct RngDbg {
+                len: usize,
+            }
+            impl core::fmt::Debug for RngDbg {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.debug_struct("RngDbg").field("len", &self.len).finish()
+                }
+            }
 
             let vec_dbg = VecLenDbg {
                 len: self.spawn.borrow().len(),
             };
             f.debug_struct("SimulationEnv")
-                .field("rng", &self.rng)
+                .field(
+                    "rng",
+                    &self.rng.try_borrow().map(|x| RngDbg { len: x.len() }),
+                )
                 .field("spawn", &vec_dbg)
                 .field(
                     "nodes",
-                    &self.nodes.borrow().iter().map(|x| &x.0).collect::<Vec<_>>(),
+                    &self
+                        .nodes
+                        .try_borrow()
+                        .map(|x| x.iter().map(|x| x.0.clone()).collect::<Vec<_>>()),
                 )
+                .field("drivers", &self.drivers)
                 .field("graph", &self.graph)
+                .field("node_len", &self.node_len)
                 .finish()
         }
     }
@@ -154,12 +177,10 @@ mod arbitrary {
         MockDriver::get().reset();
     }
 
-    fn arbitrary_nodes(
-        env: &mut SimulationEnv,
-        phy: Arc<Mutex<PhysicalChannel>>,
-    ) -> Result<(), arbitrary::Error> {
-        let node_len = (2..=8).sample_single(&mut env.rng.get_mut());
-        let nodes = env.rng.get_mut().with_unstructured(|u| {
+    fn arbitrary_nodes(env: &mut SimulationEnv) -> Result<(), arbitrary::Error> {
+        let node_len = (2..=8).sample_single(&mut *env.rng.borrow_mut());
+        env.node_len = node_len;
+        let nodes = env.rng.borrow_mut().with_unstructured(|u| {
             core::iter::repeat_with(|| u.arbitrary::<Node>())
                 .take(node_len)
                 .collect::<Result<Vec<_>, _>>()
@@ -176,36 +197,43 @@ mod arbitrary {
         let nodes = nodes
             .into_iter()
             .map(|node| {
-                let (ap_stack, mut ap_runner) = embassy_net::new(
+                let (ap_driver, sta_driver) = (
                     MeshDevice::new({
-                        let driver = TestDriver::new(node.mac, phy.clone());
-                        phy.lock().connected.push(driver.local_msgs.clone());
-                        driver
+                        SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac))))
                     }),
+                    MeshDevice::new({
+                        SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac))))
+                    }),
+                );
+                env.drivers.push(
+                    (
+                        ap_driver.clone().into_inner(),
+                        sta_driver.clone().into_inner(),
+                    )
+                        .clone(),
+                );
+                let (ap_stack, mut ap_runner) = embassy_net::new(
+                    ap_driver,
                     embassy_net::Config::ipv6_static(StaticConfigV6 {
                         address: tree_mesh::consts::AP_CIDR,
                         gateway: Some(tree_mesh::consts::AP_CIDR.address()),
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.get_mut().arbitrary()?,
+                    env.rng.borrow_mut().gen(),
                 );
                 env.spawn
                     .borrow_mut()
                     .push(Box::pin(async move { ap_runner.run().await }));
                 let (sta_stack, mut sta_runner) = embassy_net::new(
-                    MeshDevice::new({
-                        let driver = TestDriver::new(node.mac, phy.clone());
-                        phy.lock().connected.push(driver.local_msgs.clone());
-                        driver
-                    }),
+                    sta_driver,
                     embassy_net::Config::ipv6_static(StaticConfigV6 {
                         address: tree_mesh::consts::sta_cidr_from_mac(node.mac.into()),
                         gateway: Some(tree_mesh::consts::AP_CIDR.address()),
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.get_mut().arbitrary()?,
+                    env.rng.borrow_mut().gen(),
                 );
                 env.spawn
                     .borrow_mut()
@@ -220,9 +248,9 @@ mod arbitrary {
                     Box::leak(Box::new([0; { 2usize.pow(10) }])),
                     Box::leak(Box::new([0; { 2usize.pow(10) }])),
                 );
-                Ok((node, (ap_stack, ap_socket), (sta_stack, sta_socket)))
+                (node, (ap_stack, ap_socket), (sta_stack, sta_socket))
             })
-            .collect::<Result<Vec<_>, arbitrary::Error>>()?;
+            .collect::<Vec<_>>();
         *env.nodes.get_mut() = nodes;
         Ok(())
     }
@@ -230,46 +258,63 @@ mod arbitrary {
     /// Initialize connection graph into `env`.
     fn arbitrary_connection_graph(env: &mut SimulationEnv) {
         let indices = 0..env.nodes.borrow().len();
-        while env.graph.node_count() < env.nodes.borrow().len() {
-            env.graph.add_node(());
+        while env.graph.borrow().node_count() < env.nodes.borrow().len() {
+            env.graph.borrow_mut().add_node(());
         }
+
+        // Connect all nodes to and from 0.
+        // TODO remove this.
+        for i in 1..indices.end {
+            env.graph
+                .borrow_mut()
+                .add_edge(0.into(), i.into(), PhysicalChannel::new());
+            env.graph
+                .borrow_mut()
+                .add_edge(i.into(), 0.into(), PhysicalChannel::new());
+        }
+
         // For each node.
         for i in indices.clone() {
-            let other_indices = indices.clone().filter(|x| *x != i);
+            let other_indices = (i + 1)..env.nodes.borrow().len();
+            if other_indices.clone().count() == 0 {
+                continue;
+            }
+
             // Add a random amount of edges to other nodes.
-            let mut neighbors = vec![
-                0;
-                other_indices
-                    .clone()
-                    .choose(&mut env.rng.get_mut())
-                    .unwrap()
-            ];
-            other_indices.choose_multiple_fill(&mut env.rng.get_mut(), &mut neighbors);
-            // To other nodes.
+            let other_len = (0..other_indices.clone().count())
+                .choose(&mut *env.rng.borrow_mut())
+                .unwrap();
+            let mut neighbors = vec![0; other_len];
+            other_indices.choose_multiple_fill(&mut *env.rng.borrow_mut(), &mut neighbors);
             for j in neighbors {
-                env.graph.add_edge(i.into(), j.into(), ());
+                // To other nodes.
+                if !env.graph.borrow().contains_edge(i.into(), j.into()) {
+                    env.graph
+                        .borrow_mut()
+                        .add_edge(i.into(), j.into(), PhysicalChannel::new());
+                }
+                // Make sure to add the reverse direction if it is missing.
+                if !env.graph.borrow().contains_edge(j.into(), i.into()) {
+                    env.graph
+                        .borrow_mut()
+                        .add_edge(j.into(), i.into(), PhysicalChannel::new());
+                }
             }
         }
     }
 
     async fn run_sim_test(
-        rng: &mut RngUnstructured,
+        rng: Rc<RefCell<RngUnstructured>>,
         sim: impl AsyncFn(&SimulationEnv) -> Result<(), WifiError>,
     ) -> arbitrary::Result<()> {
-        let phy = Arc::new(Mutex::new(PhysicalChannel {
-            in_air: BinaryHeap::new(),
-            rng: rng.clone(),
-            connected: Vec::new(),
-        }));
-
         // Detect deadlocks.
         thread::spawn(|| loop {
             thread::sleep(core::time::Duration::from_micros(1000));
             panic_on_deadlock();
         });
 
-        let mut env = SimulationEnv::new(rng.clone());
-        arbitrary_nodes(&mut env, phy.clone())?;
+        let mut env = SimulationEnv::new(rng);
+        arbitrary_nodes(&mut env)?;
         arbitrary_connection_graph(&mut env);
 
         let (waker, count) = futures_test::task::new_count_waker();
@@ -297,7 +342,11 @@ mod arbitrary {
                 }
 
                 let no_alarms = !MockDriver::get().alarm_pending();
-                let no_in_flight_msgs = phy.lock().in_air.is_empty();
+                let no_in_flight_msgs = env
+                    .graph
+                    .borrow()
+                    .edge_weights()
+                    .all(|x| x.in_air.is_empty());
                 let no_new_wakes = count.get() == prev_count;
                 // If nothing will happen again then break.
                 if no_alarms && no_in_flight_msgs && no_new_wakes {
@@ -308,8 +357,44 @@ mod arbitrary {
 
                 // Poll the simulation to move forward time and deliver messages from physical channel.
                 let now = embassy_time::Instant::now();
-                phy.lock().poll(now.as_ticks());
+                for i in 0..env.node_len {
+                    let data = match (
+                        env.drivers[i].0 .0.borrow_mut().tx_queue.lock().pop_front(),
+                        env.drivers[i].1 .0.borrow_mut().tx_queue.lock().pop_front(),
+                    ) {
+                        (_, Some(x)) => x,
+                        (Some(x), _) => x,
+                        _ => continue,
+                    };
+                    let iter = env
+                        .graph
+                        .borrow()
+                        .edges(i.into())
+                        .map(|x| x.id())
+                        .collect::<Vec<_>>();
+                    for edge_id in iter {
+                        let mut graph = env.graph.borrow_mut();
+                        let weight = graph.edge_weight_mut(edge_id).unwrap();
+                        weight.tx(Message {
+                            delivery_time: now.as_ticks()
+                                + env.rng.borrow_mut().arbitrary::<u16>()? as u64,
+                            data: data.clone(),
+                        });
+                    }
+                }
+                let iter = env
+                    .graph
+                    .borrow_mut()
+                    .edge_references()
+                    .map(|x| (x.id(), x.target()))
+                    .collect::<Vec<_>>();
+                for (edge_id, to) in iter {
+                    let mut graph = env.graph.borrow_mut();
+                    let phy = graph.edge_weight_mut(edge_id).unwrap();
+                    phy.poll(now.as_ticks(), &env.drivers[to.index()]);
+                }
                 MockDriver::get().advance(embassy_time::Duration::from_millis(1));
+                println!("{:0>2X?}", env);
             }
         };
         match res {
@@ -334,6 +419,9 @@ mod arbitrary {
                         .choose_multiple_fill(&mut *env.rng.borrow_mut(), &mut out);
                     out
                 };
+                // TODO remove this line
+                let idx1 = 0;
+
                 if iter > max_iters as u16 {
                     break;
                 }
@@ -397,7 +485,7 @@ mod arbitrary {
             res
         })
         .size_min(256)
-        // .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
+        .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
         .run();
     }
 }

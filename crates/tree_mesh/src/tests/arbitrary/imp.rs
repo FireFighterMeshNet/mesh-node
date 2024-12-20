@@ -1,60 +1,44 @@
-use crate::{
-    simulator::{Event, GetMac, Sniffer},
-    tests::arbitrary_rng::RngUnstructured,
-};
-use core::task::Waker;
+use crate::simulator::{Event, GetMac, Sniffer};
+use core::{cell::RefCell, task::Waker};
 use critical_section::CriticalSection;
 use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
 use parking_lot::Mutex;
-use rand::Rng;
 use std::{
     collections::{BinaryHeap, VecDeque},
+    rc::Rc,
     sync::Arc,
 };
 
 /// Messages sorted by delivery time.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Message {
-    delivery_time: u64,
-    data: Box<[u8]>,
+    pub delivery_time: u64,
+    pub data: Box<[u8]>,
 }
 
 type Shared<T> = Arc<Mutex<T>>;
 
-/// Priority queue of messages to deliver and source of entropy.
+/// Priority queue of messages to deliver after a delay.
 /// Simulates the physical channel.
 #[derive(Debug)]
 pub struct PhysicalChannel {
     pub in_air: BinaryHeap<Message>,
-    pub rng: RngUnstructured,
-    // Message rx_queue for connected nodes.
-    pub connected: Vec<Shared<(Option<Waker>, VecDeque<Message>)>>,
 }
 impl PhysicalChannel {
-    /// Tx new message into the simulated physcal medium.
-    pub fn tx(&mut self, data: Box<[u8]>) -> Result<(), WifiError> {
-        // TODO
-        // Randomly (deterministically) drop messages
-        // if self.u.arbitrary()? {
-        //     return Ok(());
-        // }
-
-        // TODO
-        // Randomly delay delivery time.
-        // let delivery_time = self.u.arbitrary::<u16>()? as u64;
-        let delivery_time = 0;
-
-        self.in_air.push(Message {
-            delivery_time,
-            data,
-        });
-        Ok(())
+    pub fn new() -> Self {
+        Self {
+            in_air: BinaryHeap::new(),
+        }
+    }
+    /// Tx new message into the simulated physical medium.
+    pub fn tx(&mut self, msg: Message) {
+        self.in_air.push(msg);
     }
     /// Poll with the new time of `tick` to deliver messages based on delivery times.
     /// # Note
     /// `tick` should be monotonic
-    pub fn poll(&mut self, tick: u64) {
+    pub fn poll(&mut self, tick: u64, to_driver: &(SharedTestDriver, SharedTestDriver)) {
         // Get next msg
         let Some(msg) = self.in_air.peek() else {
             return;
@@ -63,19 +47,14 @@ impl PhysicalChannel {
         if tick < msg.delivery_time {
             return;
         }
-        // Deliver (flood) to all connected.
-        for rx in &self.connected {
-            // Randomly (deterministically) drop messages to some nodes.
-            if self.rng.gen() {
-                log::debug!("dropped pkt");
-                continue;
-            }
-            let mut rx = rx.lock();
-            rx.1.push_back(msg.clone());
-            rx.0.take().map(Waker::wake);
-        }
-        // Don't need that message anymore.
-        self.in_air.pop();
+        let msg = self.in_air.pop().unwrap();
+
+        // Add to both rx interfaces of `to` node.
+        let mut drivers = (to_driver.0 .0.borrow_mut(), to_driver.1 .0.borrow_mut());
+        drivers.0.rx_queue.lock().push_back(msg.clone());
+        drivers.0.rx_waker.take().map(Waker::wake);
+        drivers.1.rx_queue.lock().push_back(msg.clone());
+        drivers.1.rx_waker.take().map(Waker::wake);
     }
 }
 
@@ -90,14 +69,13 @@ impl Event for MACAddress {
     }
 }
 pub struct TestSniffer {
-    phy: Shared<PhysicalChannel>,
     cb: Option<fn(&[u8])>,
 }
 impl Sniffer for TestSniffer {
     type Error = WifiError;
 
     fn send_raw_frame(&mut self, data: &[u8]) -> Result<(), WifiError> {
-        self.phy.lock().tx(data.into())
+        todo!()
     }
 }
 
@@ -110,67 +88,72 @@ error_set::error_set!(
 pub struct TestController;
 
 pub struct TestRxToken {
-    msgs: Shared<(Option<Waker>, VecDeque<Message>)>,
+    rx_queue: Shared<VecDeque<Message>>,
 }
 impl RxToken for TestRxToken {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut msg = self.msgs.lock().1.pop_front().unwrap();
+        let mut msg = self.rx_queue.lock().pop_front().unwrap();
         let log_msg = format!("rxed: {:0>2X?}", msg.data);
         let log_msg = log_msg.replace(",", "");
+        let stderr = std::io::stderr().lock();
         println!("{log_msg}");
+        drop(stderr);
         f(&mut msg.data)
     }
 }
 pub struct TestTxToken {
-    phy: Shared<PhysicalChannel>,
+    pub tx_queue: Shared<VecDeque<Box<[u8]>>>,
 }
 impl TxToken for TestTxToken {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut data = vec![0; len];
+        let mut data = vec![0; len].into_boxed_slice();
         let res = f(&mut data);
         let log_msg = format!("txed: {data:0>2X?}");
         let log_msg = log_msg.replace(",", "");
+        let stderr = std::io::stderr().lock();
         println!("{log_msg}");
-        self.phy.lock().tx(data.into()).unwrap();
+        drop(stderr);
+        self.tx_queue.lock().push_back(data);
         res
     }
 }
 #[derive(Debug, Clone)]
 pub struct TestDriver {
     pub mac: [u8; 6],
-    pub phy: Shared<PhysicalChannel>,
-    // rx waker, messages
-    pub local_msgs: Shared<(Option<Waker>, VecDeque<Message>)>,
+    pub tx_queue: Shared<VecDeque<Box<[u8]>>>,
+    pub rx_queue: Shared<VecDeque<Message>>,
+    pub rx_waker: Option<Waker>,
 }
 impl TestDriver {
-    pub fn new(mac: [u8; 6], phy: Shared<PhysicalChannel>) -> Self {
+    pub fn new(mac: [u8; 6]) -> Self {
         Self {
             mac,
-            phy,
-            local_msgs: Arc::new(Mutex::new((None, VecDeque::new()))),
+            tx_queue: Arc::new(Mutex::new(VecDeque::new())),
+            rx_queue: Arc::new(Mutex::new(VecDeque::new())),
+            rx_waker: None,
         }
     }
     pub fn tx_tok(&mut self) -> Result<TestTxToken, WifiError> {
         Ok(TestTxToken {
-            phy: self.phy.clone(),
+            tx_queue: self.tx_queue.clone(),
         })
     }
     pub fn rx_tok(&mut self) -> Result<Option<(TestRxToken, TestTxToken)>, WifiError> {
-        if self.local_msgs.lock().1.is_empty() {
+        if self.rx_queue.lock().is_empty() {
             return Ok(None);
         }
         Ok(Some((
             TestRxToken {
-                msgs: self.local_msgs.clone(),
+                rx_queue: self.rx_queue.clone(),
             },
             TestTxToken {
-                phy: self.phy.clone(),
+                tx_queue: self.tx_queue.clone(),
             },
         )))
     }
@@ -194,8 +177,7 @@ impl Driver for TestDriver {
         match res {
             Some(x) => Some(x),
             None => {
-                self.local_msgs.lock().0 = Some(cx.waker().clone());
-                // self.rx_wakers.lock().push(cx.waker().clone());
+                self.rx_waker = Some(cx.waker().clone());
                 None
             }
         }
@@ -217,6 +199,44 @@ impl Driver for TestDriver {
 
     fn hardware_address(&self) -> embassy_net::driver::HardwareAddress {
         embassy_net::driver::HardwareAddress::Ethernet(self.mac)
+    }
+}
+
+/// Shared reference to [`TestDriver`]
+#[derive(Debug, Clone)]
+pub struct SharedTestDriver(pub Rc<RefCell<TestDriver>>);
+impl Driver for SharedTestDriver {
+    type RxToken<'a>
+        = <TestDriver as Driver>::RxToken<'a>
+    where
+        Self: 'a;
+
+    type TxToken<'a>
+        = <TestDriver as Driver>::TxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(
+        &mut self,
+        cx: &mut core::task::Context,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        self.0.borrow_mut().receive(cx)
+    }
+
+    fn transmit(&mut self, cx: &mut core::task::Context) -> Option<Self::TxToken<'_>> {
+        self.0.borrow_mut().transmit(cx)
+    }
+
+    fn link_state(&mut self, cx: &mut core::task::Context) -> embassy_net::driver::LinkState {
+        self.0.borrow_mut().link_state(cx)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.0.borrow_mut().capabilities()
+    }
+
+    fn hardware_address(&self) -> embassy_net::driver::HardwareAddress {
+        self.0.borrow_mut().hardware_address()
     }
 }
 
