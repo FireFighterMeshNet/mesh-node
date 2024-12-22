@@ -2,7 +2,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
-#![feature(async_closure)] // async || syntax
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -248,7 +247,7 @@ pub async fn forward<E>(
     ap_mac: MACAddress,
     ap_tx_socket: &mut TcpSocket<'static>,
     sta_tx_socket: &mut TcpSocket<'static>,
-    mut tx_me: impl async FnMut(&[u8]) -> Result<(), E>,
+    mut tx_me: impl AsyncFnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     // Make sure if `Packet`'s length type is not `u8` this doesn't overflow flash.
     const MAX_SIZE: usize = 1024;
