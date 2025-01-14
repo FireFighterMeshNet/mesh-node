@@ -1,5 +1,6 @@
 use arbitrary::Unstructured;
 use rand::RngCore;
+use std::{borrow::ToOwned, vec::Vec};
 
 /// Adapter from [`Unstructured`] to [`RngCore`] traits.
 /// Uses defaults for rng traits.

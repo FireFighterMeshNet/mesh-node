@@ -18,10 +18,10 @@ pub struct PacketHeader {
     len: PacketLen,
 }
 impl PacketHeader {
-    pub fn new(destination: MACAddress, len: usize) -> Result<Self, PacketNewErr> {
+    pub fn new(destination: MACAddress, len: usize) -> Result<Self, error::PacketNewErr> {
         Ok(Self {
             destination: destination.0,
-            len: len.try_into().map_err(|_| PacketNewErr::TooBig)?,
+            len: len.try_into().map_err(|_| error::PacketNewErr::TooBig)?,
         })
     }
     pub fn len(&self) -> usize {
@@ -86,7 +86,7 @@ impl Packet<&[u8]> {
     }
 }
 impl<T: AsRef<[u8]>> Packet<T> {
-    pub fn new(destination: MACAddress, data: T) -> Result<Self, PacketNewErr> {
+    pub fn new(destination: MACAddress, data: T) -> Result<Self, error::PacketNewErr> {
         Ok(Self {
             header: PacketHeader::new(destination, data.as_ref().len())?,
             data,
@@ -106,21 +106,21 @@ impl<T: AsRef<[u8]>> Packet<T> {
         &self,
         ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
         sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-    ) -> Result<(), PacketSendErr> {
+    ) -> Result<(), error::PacketSendErr> {
         let dest = self.header.destination();
 
         let socket = next_hop_socket(dest, ap_tx_socket, sta_tx_socket)
             .await
-            .ok_or(PacketSendErr::NextHopMissing)?;
+            .ok_or(error::PacketSendErr::NextHopMissing)?;
 
         socket
             .write_all(self.header.as_bytes())
             .await
-            .map_err(|e| PacketSendErr::Tcp { source: e })?;
+            .map_err(|e| error::PacketSendErr::Tcp { source: e })?;
         socket
             .write_all(self.data.as_ref())
             .await
-            .map_err(|e| PacketSendErr::Tcp { source: e })?;
+            .map_err(|e| error::PacketSendErr::Tcp { source: e })?;
 
         Ok(())
     }

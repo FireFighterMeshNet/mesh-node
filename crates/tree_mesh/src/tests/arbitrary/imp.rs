@@ -4,6 +4,7 @@ use critical_section::CriticalSection;
 use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
 use std::{
+    boxed::Box,
     collections::{BinaryHeap, VecDeque},
     rc::Rc,
 };

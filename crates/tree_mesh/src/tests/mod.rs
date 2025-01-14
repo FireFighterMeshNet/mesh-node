@@ -39,7 +39,7 @@ mod arbitrary {
     use parking_lot::Mutex;
     use petgraph::{visit::EdgeRef, Graph};
     use rand::{distributions::uniform::SampleRange, seq::IteratorRandom, Rng};
-    use std::{rc::Rc, thread};
+    use std::{boxed::Box, rc::Rc, thread, vec::Vec};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Node {

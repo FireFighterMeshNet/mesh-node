@@ -1,13 +1,18 @@
 //! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
+
+#[cfg(feature = "std")]
+#[macro_use]
+extern crate std;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 pub mod consts;
 pub mod device;
+mod error;
 pub mod macros;
 pub mod node_data;
 pub mod packet;
@@ -19,7 +24,7 @@ mod tests;
 pub use packet::{Packet, PacketHeader};
 
 use common::{err, UnwrapExt};
-use core::{cell::RefCell, marker::PhantomData};
+use core::{cell::RefCell, marker::PhantomData, ops::AsyncFnMut};
 use critical_section::Mutex;
 use embassy_net::{
     tcp::{TcpReader, TcpSocket},
@@ -44,39 +49,6 @@ use ieee80211::{
 use node_data::{NodeData, NodeDataBeaconMsg, NodeTable};
 use scroll::{ctx::SizeWith, Pread, Pwrite};
 use simulator::*;
-
-error_set::error_set! {
-    SendToParentErr = {
-        #[display("no parent")]
-        NoParent,
-    } || PacketSendErr || PacketNewErr;
-    SendToChildErr = {
-        #[display("child missing")]
-        NoChild
-    } || PacketSendErr || PacketNewErr;
-    PacketSendErr = {
-        #[display("{source:?}")]
-        Tcp {
-            source: embassy_net::tcp::Error
-        },
-        /// The selected next hop isn't available.
-        NextHopMissing
-        // #[display("{source:?}")]
-        // ScrollErr {
-        //     source: scroll::Error,
-        // },
-    };
-    PacketNewErr = {
-        /// Too much data for one packet.
-        #[display("data too large for one packet")]
-        TooBig,
-    };
-    /// Errors related to messages received.
-    InvalidMsg = {
-        /// Protocol version of msg doesn't match.
-        Version { version: Version },
-    };
-}
 
 pub type Version = u8;
 pub type Level = u8;
@@ -107,10 +79,10 @@ pub async fn send_to_parent(
     data: &[u8],
     ap_tx_socket: &mut TcpSocket<'static>,
     sta_tx_socket: &mut TcpSocket<'static>,
-) -> Result<(), SendToParentErr> {
+) -> Result<(), error::SendToParentErr> {
     let pkt = Packet::new(
         critical_section::with(|cs| STATE.borrow_ref_mut(cs).parent)
-            .ok_or(SendToParentErr::NoParent)?,
+            .ok_or(error::SendToParentErr::NoParent)?,
         data,
     )?;
     pkt.send(ap_tx_socket, sta_tx_socket).await?;

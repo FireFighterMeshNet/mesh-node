@@ -1,5 +1,6 @@
 use core::{ptr, sync::atomic::AtomicU64};
 use parking_lot::Mutex;
+use std::vec::Vec;
 
 /// Unsafely mark as Send. This way the unsafety is contained.
 #[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
