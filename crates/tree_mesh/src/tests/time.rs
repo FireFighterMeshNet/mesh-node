@@ -1,11 +1,6 @@
-use core::{ptr, sync::atomic::AtomicU64};
+use core::{sync::atomic::AtomicU64, task::Waker};
 use parking_lot::Mutex;
 use std::vec::Vec;
-
-/// Unsafely mark as Send. This way the unsafety is contained.
-#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
-struct UnsafeSendCell<T>(T);
-unsafe impl<T> Send for UnsafeSendCell<T> {}
 
 #[derive(Debug, Default)]
 pub struct MockDriverInner {}
@@ -24,22 +19,26 @@ impl MockDriver {
             .fetch_add(dt, core::sync::atomic::Ordering::SeqCst)
             + dt;
 
-        for alarm in &mut *self.alarms.lock() {
-            // Fire alarm if timestamp past.
-            if alarm.2 <= tick {
-                let alarm_fn = alarm.0;
-                let alarm_data = alarm.1;
-                alarm.2 = u64::MAX;
-
-                log::trace!("fire alarm at {}", tick);
-                alarm_fn(alarm_data.0);
-            }
-        }
+        let alarms = &mut *self.alarms.lock();
+        let taken_alarms = core::mem::take(alarms);
+        *alarms = taken_alarms
+            .into_iter()
+            .filter_map(|alarm| {
+                // Fire alarm if timestamp past.
+                if alarm.0 <= tick {
+                    log::trace!("fire alarm at {}", tick);
+                    alarm.1.wake();
+                    None
+                } else {
+                    Some(alarm)
+                }
+            })
+            .collect();
     }
 }
 #[derive(Debug, Default)]
 pub struct MockDriver {
-    alarms: Mutex<Vec<(fn(*mut ()), UnsafeSendCell<*mut ()>, u64)>>,
+    alarms: Mutex<Vec<(u64, Waker)>>,
     pub tick: AtomicU64,
 }
 impl MockDriver {
@@ -58,38 +57,18 @@ impl MockDriver {
     }
     /// Return if any alarms are pending and not disabled. Useful for ending the test if nothing further will happen.
     pub fn alarm_pending(&self) -> bool {
-        self.alarms.lock().iter().any(|x| x.2 != u64::MAX)
+        !self.alarms.lock().is_empty()
     }
 }
 impl embassy_time_driver::Driver for MockDriver {
     fn now(&self) -> u64 {
         self.tick.load(core::sync::atomic::Ordering::SeqCst)
     }
-
-    unsafe fn allocate_alarm(&self) -> Option<embassy_time_driver::AlarmHandle> {
+    fn schedule_wake(&self, at: u64, waker: &core::task::Waker) {
         let mut alarms = self.alarms.lock();
         let idx = alarms.len();
         log::trace!("allocated alarm {idx}");
-        alarms.push((drop, UnsafeSendCell(ptr::null_mut()), u64::MAX));
-        Some(embassy_time_driver::AlarmHandle::new(idx as _))
-    }
-
-    fn set_alarm_callback(
-        &self,
-        alarm: embassy_time_driver::AlarmHandle,
-        callback: fn(*mut ()),
-        ctx: *mut (),
-    ) {
-        log::trace!("setting alarm callback: {}", alarm.id());
-        let mut alarms = self.alarms.lock();
-        alarms[alarm.id() as usize] = (callback, UnsafeSendCell(ctx), u64::MAX);
-    }
-
-    fn set_alarm(&self, alarm: embassy_time_driver::AlarmHandle, timestamp: u64) -> bool {
-        log::trace!("setting alarm: {} at {}", alarm.id(), timestamp);
-        let mut alarms = self.alarms.lock();
-        alarms[alarm.id() as usize].2 = timestamp;
-        true
+        alarms.push((at, waker.clone()));
     }
 }
 embassy_time_driver::time_driver_impl! {static DRIVER: MockDriver = MockDriver::INIT}

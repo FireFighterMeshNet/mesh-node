@@ -1,5 +1,4 @@
 use common::UnwrapExt;
-use critical_section::CriticalSection;
 use embassy_sync::once_lock::OnceLock;
 use esp_wifi::wifi::{event::EventExt, WifiController};
 use ieee80211::mac_parser::MACAddress;
@@ -26,10 +25,8 @@ macro_rules! wrap_event {
     ($wrapper:ident, $event:path, $member:ident) => {
         pub struct $wrapper(pub $event);
         impl Event for $wrapper {
-            fn update_handler(
-                mut f: impl FnMut(CriticalSection<'_>, &Self) + Send + Sync + 'static,
-            ) {
-                <$event>::update_handler(move |cs, event| f(cs, &Self(*event)))
+            fn update_handler<F: FnMut(&Self) + Send + Sync + 'static>(mut f: F) {
+                <$event>::update_handler(move |event| f(&Self(*event)))
             }
         }
         impl GetMac for $wrapper {

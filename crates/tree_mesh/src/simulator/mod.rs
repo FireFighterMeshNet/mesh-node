@@ -1,13 +1,12 @@
 //! Abstract out io so it can be simulated in tests.
 
-use critical_section::CriticalSection;
 use ieee80211::mac_parser::MACAddress;
 
 pub trait GetMac {
     fn mac(&self) -> MACAddress;
 }
 pub trait Event {
-    fn update_handler(f: impl FnMut(CriticalSection<'_>, &Self) + Sync + Send + 'static);
+    fn update_handler<F: FnMut(&Self) + Sync + Send + 'static>(f: F);
 }
 pub trait Sniffer {
     type Error: core::fmt::Debug;

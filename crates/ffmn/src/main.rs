@@ -16,11 +16,11 @@ use esp32_imp::{EspIO, SnifferWrapper};
 use esp_backtrace as _;
 use esp_hal::{
     gpio::{GpioPin, Input},
-    macros::handler,
+    handler,
+    interrupt::InterruptConfigurable,
     peripherals::TIMG0,
     rng::Rng,
     timer::timg::{TimerGroup, Wdt},
-    InterruptConfigurable,
 };
 use esp_wifi::{
     self,

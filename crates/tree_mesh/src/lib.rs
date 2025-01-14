@@ -2,6 +2,7 @@
 #![no_std]
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
+#![feature(async_closure)] // not needed in 1.85
 
 #[cfg(feature = "std")]
 #[macro_use]
@@ -452,8 +453,8 @@ pub(crate) async fn connect_to_next_parent<S: IO>(
     controller: &'static AsyncMutex<S::Controller>,
 ) -> ! {
     // Make sure to update state on disconnects.
-    S::StaDisconnected::update_handler(|cs, event| {
-        STATE.borrow_ref_mut(cs).mark_me_disconnected();
+    S::StaDisconnected::update_handler(|event| {
+        critical_section::with(|cs| STATE.borrow_ref_mut(cs).mark_me_disconnected());
         log::warn!("STA disconnected: {}", event.mac());
     });
 

@@ -225,7 +225,7 @@ pub(crate) async fn propagate_neighbors<S: IO>(
     ap_rx_socket: &'static mut TcpSocket<'static>,
     sta_tx_socket: &'static mut TcpSocket<'static>,
 ) -> ! {
-    S::ApStadisconnected::update_handler(|_, event| {
+    S::ApStadisconnected::update_handler(|event| {
         let ap_mac = S::sta_mac_to_ap(event.mac());
         MAC_CHANGE_TO_TX
             .try_send(PropagateNeighborMsg::Disconnect(ap_mac.0))
@@ -240,7 +240,7 @@ pub(crate) async fn propagate_neighbors<S: IO>(
             }
         })
     });
-    S::ApStaconnected::update_handler(|_, event| {
+    S::ApStaconnected::update_handler(|event| {
         let ap_mac = S::sta_mac_to_ap(event.mac());
         critical_section::with(|cs| {
             let table = &mut *STATE.borrow_ref_mut(cs);
