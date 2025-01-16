@@ -1,1 +1,1 @@
-Mesh algorithm that works by creating an tree.
+Mesh algorithm that works by creating a tree.
