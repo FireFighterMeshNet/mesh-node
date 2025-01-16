@@ -20,7 +20,7 @@ mod arbitrary {
     mod imp;
 
     use super::{arbitrary_rng::RngUnstructured, time::MockDriver};
-    use crate::{device::MeshDevice, tests::get_two_mut};
+    use crate::{device::MeshRunner, tests::get_two_mut};
     use arbitrary::{Arbitrary, Unstructured};
     use common::LogFutExt;
     use core::{
@@ -32,13 +32,15 @@ mod arbitrary {
     };
     use embassy_futures::join::join;
     use embassy_net::{
-        tcp::TcpSocket, IpEndpoint, IpListenEndpoint, Stack, StackResources, StaticConfigV6,
+        tcp::TcpSocket, udp::UdpSocket, IpEndpoint, IpListenEndpoint, Stack, StackResources,
+        StaticConfigV6,
     };
     use embedded_io_async::Write;
     use imp::{Message, PhysicalChannel, SharedTestDriver, TestDriver, WifiError};
     use parking_lot::Mutex;
     use petgraph::{visit::EdgeRef, Graph};
     use rand::{distributions::uniform::SampleRange, seq::IteratorRandom, Rng};
+    use smoltcp::storage::PacketMetadata;
     use std::{boxed::Box, rc::Rc, thread, vec::Vec};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +181,7 @@ mod arbitrary {
         MockDriver::get().reset();
     }
 
-    fn arbitrary_nodes(env: &mut SimulationEnv) -> Result<(), arbitrary::Error> {
+    fn arbitrary_shared_driver_nodes(env: &mut SimulationEnv) -> Result<(), arbitrary::Error> {
         let node_len = (2..=8).sample_single(&mut *env.rng.borrow_mut());
         env.node_len = node_len;
         let nodes = env.rng.borrow_mut().with_unstructured(|u| {
@@ -200,20 +202,11 @@ mod arbitrary {
             .into_iter()
             .map(|node| {
                 let (ap_driver, sta_driver) = (
-                    MeshDevice::new({
-                        SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac))))
-                    }),
-                    MeshDevice::new({
-                        SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac))))
-                    }),
+                    SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac)))),
+                    SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac)))),
                 );
-                env.drivers.push(
-                    (
-                        ap_driver.clone().into_inner(),
-                        sta_driver.clone().into_inner(),
-                    )
-                        .clone(),
-                );
+                env.drivers
+                    .push((ap_driver.clone(), sta_driver.clone()).clone());
                 let (ap_stack, mut ap_runner) = embassy_net::new(
                     ap_driver,
                     embassy_net::Config::ipv6_static(StaticConfigV6 {
@@ -247,6 +240,115 @@ mod arbitrary {
                 );
                 let sta_socket = TcpSocket::new(
                     sta_stack,
+                    Box::leak(Box::new([0; { 2usize.pow(10) }])),
+                    Box::leak(Box::new([0; { 2usize.pow(10) }])),
+                );
+                (node, (ap_stack, ap_socket), (sta_stack, sta_socket))
+            })
+            .collect::<Vec<_>>();
+        *env.nodes.get_mut() = nodes;
+        Ok(())
+    }
+
+    fn arbitrary_mesh_driver_nodes(env: &mut SimulationEnv) -> Result<(), arbitrary::Error> {
+        let node_len = (2..=8).sample_single(&mut *env.rng.borrow_mut());
+        env.node_len = node_len;
+        let nodes = env.rng.borrow_mut().with_unstructured(|u| {
+            core::iter::repeat_with(|| u.arbitrary::<Node>())
+                .take(node_len)
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        // All nodes should be different.
+        for i in 0..nodes.len() {
+            for j in 0..nodes.len() {
+                if i != j {
+                    assert_ne!(nodes[i].mac, nodes[j].mac)
+                }
+            }
+        }
+
+        let nodes = nodes
+            .into_iter()
+            .map(|node| {
+                let (ap_driver, sta_driver) = (
+                    SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac)))),
+                    SharedTestDriver(Rc::new(RefCell::new(TestDriver::new(node.mac)))),
+                );
+                use crate::device::ch;
+                env.drivers
+                    .push((ap_driver.clone(), sta_driver.clone()).clone());
+                let (ap_stack, mut ap_runner) = embassy_net::new(
+                    ap_driver,
+                    embassy_net::Config::ipv6_static(StaticConfigV6 {
+                        address: tree_mesh::consts::AP_CIDR,
+                        gateway: Some(tree_mesh::consts::AP_CIDR.address()),
+                        dns_servers: Default::default(),
+                    }),
+                    Box::leak(Box::new(StackResources::<16>::new())),
+                    env.rng.borrow_mut().gen(),
+                );
+                env.spawn
+                    .borrow_mut()
+                    .push(Box::pin(async move { ap_runner.run().await }));
+                let (sta_stack, mut sta_runner) = embassy_net::new(
+                    sta_driver,
+                    embassy_net::Config::ipv6_static(StaticConfigV6 {
+                        address: tree_mesh::consts::sta_cidr_from_mac(node.mac.into()),
+                        gateway: Some(tree_mesh::consts::AP_CIDR.address()),
+                        dns_servers: Default::default(),
+                    }),
+                    Box::leak(Box::new(StackResources::<16>::new())),
+                    env.rng.borrow_mut().gen(),
+                );
+                env.spawn
+                    .borrow_mut()
+                    .push(Box::pin(async move { sta_runner.run().await }));
+                let state = Box::leak(Box::new(ch::State::<1514, 1, 1>::new()));
+                let (runner, overlay_device) = ch::new(
+                    state,
+                    embassy_net::driver::HardwareAddress::Ethernet(node.mac),
+                );
+                let overlay_runner = MeshRunner {
+                    runner,
+                    ap_mac: node.mac.into(),
+                    ap_socket: UdpSocket::new(
+                        ap_stack,
+                        vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
+                        vec![0; 2usize.pow(15)].leak(),
+                        vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
+                        vec![0; 2usize.pow(15)].leak(),
+                    ),
+                    sta_socket: UdpSocket::new(
+                        sta_stack,
+                        vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
+                        vec![0; 2usize.pow(15)].leak(),
+                        vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
+                        vec![0; 2usize.pow(15)].leak(),
+                    ),
+                };
+                env.spawn.borrow_mut().push(Box::pin(async move {
+                    overlay_runner.run().await;
+                }));
+                let (overlay_stack, mut overlay_runner) = embassy_net::new(
+                    overlay_device,
+                    embassy_net::Config::ipv6_static(StaticConfigV6 {
+                        address: tree_mesh::consts::sta_cidr_from_mac(node.mac.into()),
+                        gateway: Some(tree_mesh::consts::AP_CIDR.address()),
+                        dns_servers: Default::default(),
+                    }),
+                    Box::leak(Box::new(StackResources::<16>::new())),
+                    env.rng.borrow_mut().gen(),
+                );
+                env.spawn.borrow_mut().push(Box::pin(async move {
+                    overlay_runner.run().await;
+                }));
+                let ap_socket = TcpSocket::new(
+                    overlay_stack,
+                    Box::leak(Box::new([0; { 2usize.pow(10) }])),
+                    Box::leak(Box::new([0; { 2usize.pow(10) }])),
+                );
+                let sta_socket = TcpSocket::new(
+                    overlay_stack,
                     Box::leak(Box::new([0; { 2usize.pow(10) }])),
                     Box::leak(Box::new([0; { 2usize.pow(10) }])),
                 );
@@ -306,7 +408,7 @@ mod arbitrary {
     }
 
     async fn run_sim_test(
-        rng: Rc<RefCell<RngUnstructured>>,
+        env: &SimulationEnv,
         sim: impl AsyncFn(&SimulationEnv) -> Result<(), WifiError>,
     ) -> arbitrary::Result<()> {
         // Detect deadlocks.
@@ -314,10 +416,6 @@ mod arbitrary {
             thread::sleep(core::time::Duration::from_micros(1000));
             panic_on_deadlock();
         });
-
-        let mut env = SimulationEnv::new(rng);
-        arbitrary_nodes(&mut env)?;
-        arbitrary_connection_graph(&mut env);
 
         let (waker, count) = futures_test::task::new_count_waker();
         let mut prev_count = count.get();
@@ -492,7 +590,98 @@ mod arbitrary {
         arbtest::arbtest(|u| {
             let rng = Rc::new(RefCell::new(RngUnstructured::from(u)));
             let start = rng.borrow().len();
-            let res = embassy_futures::block_on(run_sim_test(rng.clone(), sim));
+
+            let mut env = SimulationEnv::new(rng.clone());
+            arbitrary_shared_driver_nodes(&mut env)?;
+            arbitrary_connection_graph(&mut env);
+            let res = embassy_futures::block_on(run_sim_test(&env, sim));
+            let end = rng.borrow().len();
+            log::trace!("test completed using {}/{} entropy", start - end, start);
+            res
+        })
+        .size_min(256)
+        .seed(((0xffeeddccu32 as u64) << 32) | (u16::MAX as u64))
+        .run();
+    }
+    #[test]
+    #[serial_test::serial]
+    fn mesh_device_test() {
+        setup();
+
+        async fn sim(env: &SimulationEnv) -> Result<(), WifiError> {
+            let max_iters: u8 = env.rng.borrow_mut().gen_range(1..=u8::MAX);
+            let mut iter = 0u16;
+            // Test communicate on overlay network.
+            loop {
+                let [idx1, idx2] = {
+                    let mut out = [0, 0];
+                    (0..env.nodes.borrow().len())
+                        .choose_multiple_fill(&mut *env.rng.borrow_mut(), &mut out);
+                    out
+                };
+                // TODO remove this line
+                let idx1 = 0;
+
+                if iter > max_iters as u16 {
+                    break;
+                }
+                iter += 1;
+
+                // Connect node.
+                let addr = crate::consts::sta_cidr_from_mac(env.nodes.borrow()[idx2].0.mac.into())
+                    .address();
+                let mut nodes = env.nodes.borrow_mut();
+                let (node1, node2) = get_two_mut(&mut nodes, idx1, idx2).unwrap();
+
+                // TODO crate::run(sniffer, controller, ap_rx_socket, sta_tx_socket, ap_mac)
+                let (r1, r2) = join(
+                    async {
+                        let r = node2
+                            .2
+                             .1
+                            .accept(IpListenEndpoint {
+                                addr: None,
+                                port: crate::consts::DATA_PORT,
+                            })
+                            .inspect("accepting")
+                            .await;
+                        println!("[{}:{}:{}] accept fin, {r:?}", file!(), line!(), column!());
+                        r
+                    },
+                    async {
+                        let r = node1
+                            .2
+                             .1
+                            .connect(IpEndpoint {
+                                addr: dbg!(addr.into()),
+                                port: crate::consts::DATA_PORT,
+                            })
+                            .inspect("connecting")
+                            .await;
+                        println!("[{}:{}:{}] connect fin, {r:?}", file!(), line!(), column!(),);
+                        r
+                    },
+                )
+                .await;
+                dbg!(r1.unwrap());
+                dbg!(r2.unwrap());
+
+                // Send some random data.
+                let data: [u8; 2048] = env.rng.borrow_mut().arbitrary()?;
+                let res = nodes[idx1].2 .1.write_all(&data).await;
+                _ = dbg!(res);
+            }
+
+            Ok(())
+        }
+
+        arbtest::arbtest(|u| {
+            let rng = Rc::new(RefCell::new(RngUnstructured::from(u)));
+            let start = rng.borrow().len();
+            let mut env = SimulationEnv::new(rng.clone());
+            arbitrary_mesh_driver_nodes(&mut env)?;
+            arbitrary_connection_graph(&mut env);
+            let res = embassy_futures::block_on(run_sim_test(&env, sim));
             let end = rng.borrow().len();
             log::trace!("test completed using {}/{} entropy", start - end, start);
             res

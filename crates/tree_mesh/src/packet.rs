@@ -46,7 +46,7 @@ macros::impl_scroll_with_zerocopy!(PacketHeader);
     zerocopy::Unaligned,
 )]
 #[repr(C)]
-pub struct Packet<T: AsRef<[u8]>> {
+pub struct Packet<T: AsRef<[u8]> + ?Sized> {
     pub header: PacketHeader,
     pub data: T,
 }
@@ -109,7 +109,7 @@ impl<T: AsRef<[u8]>> Packet<T> {
     ) -> Result<(), error::PacketSendErr> {
         let dest = self.header.destination();
 
-        let socket = next_hop_socket(dest, ap_tx_socket, sta_tx_socket)
+        let socket = next_hop_socket_connected(dest, ap_tx_socket, sta_tx_socket)
             .await
             .ok_or(error::PacketSendErr::NextHopMissing)?;
 

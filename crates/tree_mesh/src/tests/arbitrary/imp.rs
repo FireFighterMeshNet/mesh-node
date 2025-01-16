@@ -1,6 +1,5 @@
 use crate::simulator::{Event, GetMac, Sniffer};
 use core::{cell::RefCell, task::Waker};
-use critical_section::CriticalSection;
 use embassy_net::driver::{Capabilities, Driver, RxToken, TxToken};
 use ieee80211::mac_parser::MACAddress;
 use std::{
@@ -63,7 +62,7 @@ impl GetMac for MACAddress {
     }
 }
 impl Event for MACAddress {
-    fn update_handler(f: impl FnMut(CriticalSection<'_>, &Self)) {
+    fn update_handler<F>(f: F) {
         todo!()
     }
 }

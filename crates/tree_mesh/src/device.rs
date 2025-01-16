@@ -1,115 +1,130 @@
-use embassy_net::driver::{Driver, RxToken as RxTokenEmbassy, TxToken as TxTokenEmbassy};
-use smoltcp::{phy::ChecksumCapabilities, wire::EthernetRepr};
+//! Mesh overlay device.
 
-pub struct RxToken<T>(T);
-impl<T: RxTokenEmbassy> RxTokenEmbassy for RxToken<T> {
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        self.0.consume(|buf| {
-            let res = f(buf);
-            let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
-            let frame = EthernetRepr::parse(&frame).unwrap();
-            let _ = frame;
-            res
-        })
-    }
+use crate::{next_hop_select_ap_sta, Packet};
+use common::err;
+use embassy_futures::select::{select, Either};
+use embassy_net::{udp::UdpSocket, IpEndpoint, IpListenEndpoint};
+pub use embassy_net_driver_channel as ch;
+use ieee80211::mac_parser::MACAddress;
+use log::trace;
+use scroll::{ctx::MeasureWith, Pwrite};
+use smoltcp::wire::EthernetFrame;
+use zerocopy::{FromBytes, IntoBytes, SizeError};
+
+pub struct MeshRunner<'a, const MTU: usize> {
+    pub runner: ch::Runner<'a, MTU>,
+    pub ap_mac: MACAddress,
+    pub ap_socket: UdpSocket<'a>,
+    pub sta_socket: UdpSocket<'a>,
 }
-pub struct TxToken<T>(T);
-impl<T: TxTokenEmbassy> TxTokenEmbassy for TxToken<T> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        self.0.consume(len, |buf| {
-            let res = f(buf);
-            let frame = smoltcp::wire::EthernetFrame::new_unchecked(&*buf);
-            let payload = frame.payload();
-            let frame = EthernetRepr::parse(&frame).unwrap();
-            match frame.ethertype {
-                smoltcp::wire::EthernetProtocol::Ipv6 => {
-                    let ipv6 = smoltcp::wire::Ipv6Packet::new_unchecked(&*payload);
-                    let payload = ipv6.payload();
-                    let ipv6 = smoltcp::wire::Ipv6Repr::parse(&ipv6).unwrap();
-                    match ipv6.next_header {
-                        smoltcp::wire::IpProtocol::Tcp => {
-                            let tcp = smoltcp::wire::TcpPacket::new_unchecked(payload);
-                            let payload = tcp.payload();
-                            let _ = payload;
-                            let tcp = smoltcp::wire::TcpRepr::parse(
-                                &tcp,
-                                &ipv6.src_addr.into(),
-                                &ipv6.dst_addr.into(),
-                                &ChecksumCapabilities::default(),
-                            )
-                            .unwrap();
-                            let _ = tcp;
+impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
+    pub async fn run(mut self) -> ! {
+        let (_state, mut rx, mut tx) = self.runner.split();
+        self.ap_socket
+            .bind(IpListenEndpoint {
+                addr: None,
+                port: crate::consts::DATA_PORT,
+            })
+            .unwrap();
+        self.sta_socket
+            .bind(IpListenEndpoint {
+                addr: None,
+                port: crate::consts::DATA_PORT,
+            })
+            .unwrap();
+        loop {
+            match select(
+                async {
+                    // Wait until there is space to rx into overlay driver if necessary.
+                    let rx_buf = rx.rx_buf().await;
+                    // Wait until there is a rxed packet from underlay network.
+                    let ap_or_sta = select(
+                        self.ap_socket.wait_recv_ready(),
+                        self.sta_socket.wait_recv_ready(),
+                    )
+                    .await;
+                    (rx_buf, ap_or_sta)
+                },
+                // Wait until there is a packet to forward through underlay network.
+                tx.tx_buf(),
+            )
+            .await
+            {
+                Either::First((rx_buf, ap_or_sta)) => {
+                    trace!("mesh rx buf");
+                    let ready_socket = match ap_or_sta {
+                        Either::First(()) => &mut self.ap_socket,
+                        Either::Second(()) => &mut self.sta_socket,
+                    };
+                    let (len, _meta) = match ready_socket.recv_from(rx_buf).await {
+                        Ok(x) => x,
+                        e @ Err(_) => {
+                            err!(e, "received forward msg longer than MTU");
+                            continue;
                         }
-                        _ => (),
+                    };
+                    // Get the wrapped packet.
+                    let pkt = match <Packet<[u8]>>::ref_from_bytes(&rx_buf[..len])
+                        .map_err(|e| SizeError::from(e))
+                    {
+                        Ok(pkt) => pkt,
+                        e @ Err(_) => {
+                            err!(e, "rxed packet size error");
+                            continue;
+                        }
+                    };
+                    // Either deliver to overlay or forward on underlay network again depending on final destination.
+                    let to_me = pkt.header.destination() == self.ap_mac;
+                    if to_me {
+                        rx.rx_done(len);
+                    } else {
+                        // Get which socket to use.
+                        let (ip, socket) = next_hop_select_ap_sta(
+                            pkt.header.destination(),
+                            &mut self.ap_socket,
+                            &mut self.sta_socket,
+                        );
+                        // Send data to the next hop.
+                        err!(
+                            socket
+                                .send_to(
+                                    &pkt.as_bytes(),
+                                    IpEndpoint {
+                                        addr: ip,
+                                        port: crate::consts::DATA_PORT,
+                                    },
+                                )
+                                .await
+                        );
                     }
                 }
-                _ => (),
+                Either::Second(tx_buf) => {
+                    trace!("mesh tx buf");
+                    let frame = EthernetFrame::new_unchecked(&tx_buf);
+                    let dst = frame.dst_addr();
+                    // Use the tx_buf's mac destination as the final destination for the packet when forwarding. That is, the mac used by the overlay network matches the actual final destination mac.
+                    let (ip, socket) = next_hop_select_ap_sta(
+                        dst.0.into(),
+                        &mut self.ap_socket,
+                        &mut self.sta_socket,
+                    );
+                    let pkt = Packet::new(dst.0.into(), tx_buf).unwrap();
+                    // TODO if the size is too large does this await forever (buffer never getting large enough)?
+                    err!(
+                        socket
+                            .send_to_with(
+                                pkt.measure_with(&()),
+                                IpEndpoint {
+                                    addr: ip,
+                                    port: crate::consts::DATA_PORT,
+                                },
+                                |buf| buf.pwrite(&pkt, 0),
+                            )
+                            .await
+                    );
+                    tx.tx_done();
+                }
             }
-            res
-        })
-    }
-}
-
-/// A device which enables running an overlay network over an unreliable mesh network.
-#[derive(Debug, Clone)]
-pub struct MeshDevice<D> {
-    inner: D,
-}
-impl<D> MeshDevice<D> {
-    pub fn new(inner: D) -> Self {
-        Self { inner }
-    }
-    pub fn into_inner(self) -> D {
-        self.inner
-    }
-}
-impl<D: Driver> Driver for MeshDevice<D> {
-    type RxToken<'a>
-        = RxToken<D::RxToken<'a>>
-    where
-        Self: 'a;
-
-    type TxToken<'a>
-        = TxToken<D::TxToken<'a>>
-    where
-        Self: 'a;
-
-    fn receive(
-        &mut self,
-        cx: &mut core::task::Context,
-    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        self.inner.receive(cx).map(|x| (RxToken(x.0), TxToken(x.1)))
-    }
-
-    fn transmit(&mut self, cx: &mut core::task::Context) -> Option<Self::TxToken<'_>> {
-        self.inner.transmit(cx).map(TxToken)
-    }
-
-    fn link_state(&mut self, cx: &mut core::task::Context) -> embassy_net::driver::LinkState {
-        self.inner.link_state(cx)
-    }
-
-    fn capabilities(&self) -> embassy_net::driver::Capabilities {
-        self.inner.capabilities()
-    }
-
-    fn hardware_address(&self) -> embassy_net::driver::HardwareAddress {
-        // TODO: should this return `HardwareAddress::Ip` and disable neighbor discovery?
-        // Then extract the mac from the given ip and construct a new mac packet for the next hop?
-        // Or should it read the ip, calculate next mac, replace-in-place, and deliver to `inner` for next-hop transmission?
-        // In the second case, ARP broadcasts would have to forward throughout the whole tree
-        // and it would be possible to assign an ip to the overlayer with dhcp regularly.
-        let address = self.inner.hardware_address();
-        assert!(
-            !matches!(address, embassy_net::driver::HardwareAddress::Ip),
-            "can't overlay an ip network driver"
-        );
-        address
+        }
     }
 }

@@ -9,6 +9,8 @@
 extern crate std;
 
 #[cfg(feature = "alloc")]
+#[macro_use]
+#[allow(unused_imports)]
 extern crate alloc;
 
 pub mod consts;
@@ -31,7 +33,7 @@ use core::{cell::RefCell, marker::PhantomData, ops::AsyncFnMut};
 use critical_section::Mutex;
 use embassy_net::{
     tcp::{TcpReader, TcpSocket},
-    IpEndpoint, IpListenEndpoint,
+    IpAddress, IpEndpoint, IpListenEndpoint,
 };
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -157,21 +159,9 @@ pub async fn socket_force_closed(socket: &mut TcpSocket<'_>) {
     err!(socket.flush().await);
 }
 
-/// Connects using either ap (to child) or sta (to parent) interface to the node on the way to the given mac.
-/// Disconnects from previous if needed to connect to new.
-/// # Return
-/// If the selected socket was input as `None` the output will be `None`.
-async fn next_hop_socket<'a>(
-    address: MACAddress,
-    ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-    sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-) -> Option<&'a mut TcpSocket<'static>> {
-    let ap_tx_socket: Option<&mut TcpSocket<'static>> = ap_tx_socket.into();
-    let sta_tx_socket: Option<&mut TcpSocket<'static>> = sta_tx_socket.into();
-    // TODO: broadcast address should broadcast to all children and parent.
-
+fn resolve_next_hop(address: MACAddress) -> TreePos {
     // Resolve next-hop.
-    let pos = critical_section::with(|cs| {
+    critical_section::with(|cs| {
         let table = &mut *STATE.borrow_ref_mut(cs);
         if let Some(dest) = table
             .map
@@ -187,15 +177,37 @@ async fn next_hop_socket<'a>(
             log::warn!("next-hop mac {address} missing and no parent");
         }
         TreePos::Disconnected
-    });
+    })
+}
+
+fn next_hop_select_ap_sta<T>(address: MACAddress, ap: T, sta: T) -> (IpAddress, T) {
+    let pos = resolve_next_hop(address);
+    if !smoltcp::wire::EthernetAddress(address.0).is_unicast() {
+        // TODO: broadcast address should broadcast to all children and parent.
+        // TODO: the least complicated multicast implementation falls back to broadcast and relies on nodes rejecting messages they aren't subscribed to.
+        todo!()
+    }
+
     // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
-    let (ip, tx_socket) = match pos {
-        TreePos::Up | TreePos::Disconnected => (consts::AP_CIDR.address().into(), sta_tx_socket),
-        TreePos::Down(child_mac) => (
-            consts::sta_cidr_from_mac(child_mac).address().into(),
-            ap_tx_socket,
-        ),
-    };
+    match pos {
+        TreePos::Up | TreePos::Disconnected => (consts::AP_CIDR.address().into(), sta),
+        TreePos::Down(child_mac) => (consts::sta_cidr_from_mac(child_mac).address().into(), ap),
+    }
+}
+
+/// Connects using either ap (to child) or sta (to parent) interface to the node on the way to the given mac.
+/// Disconnects from previous if needed to connect to new.
+/// # Return
+/// If the selected socket was input as `None` the output will be `None`.
+async fn next_hop_socket_connected<'a>(
+    address: MACAddress,
+    ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+    sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
+) -> Option<&'a mut TcpSocket<'static>> {
+    let ap_tx_socket: Option<&mut TcpSocket<'static>> = ap_tx_socket.into();
+    let sta_tx_socket: Option<&mut TcpSocket<'static>> = sta_tx_socket.into();
+
+    let (ip, tx_socket) = next_hop_select_ap_sta(address, ap_tx_socket, sta_tx_socket);
     let tx_socket = tx_socket?;
 
     // Connect to next-hop if not already connected.
@@ -261,7 +273,7 @@ pub async fn forward<E>(
             None
         } else {
             // Connect to next hop socket and disconnect from previous if needed.
-            let tx_socket = next_hop_socket(
+            let tx_socket = next_hop_socket_connected(
                 header.destination(),
                 &mut *ap_tx_socket,
                 &mut *sta_tx_socket,
