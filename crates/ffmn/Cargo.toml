@@ -18,17 +18,17 @@ embassy-sync = "0.6.1"
 embassy-time = { version = "0.4.0", features = ["generic-queue-64"] }
 embedded-io-async = "0.6.1"
 error_set = "0.7.0"
-esp-alloc = "0.5.0"
-esp-backtrace = { version = "0.14.2", features = [
+esp-alloc = "0.6.0"
+esp-backtrace = { version = "0.15.0", features = [
     "esp32",
     "exception-handler",
     "panic-handler",
     "println",
 ] }
-esp-hal = { version = "0.22.0", features = ["esp32", "log"] }
-esp-hal-embassy = { version = "0.5.0", features = ["esp32", "log"] }
-esp-println = { version = "0.12.0", features = ["esp32", "log"] }
-esp-wifi = { version = "0.11.0", features = ["esp32",
+esp-hal = { version = "0.23.0", features = ["esp32", "log"] }
+esp-hal-embassy = { version = "0.6.0", features = ["esp32", "log"] }
+esp-println = { version = "0.13.0", features = ["esp32", "log"] }
+esp-wifi = { version = "0.12.0", features = ["esp32",
     # "utils",
     "wifi",
     "sniffer",
@@ -51,11 +51,6 @@ zerocopy = { version = "0.8.9", features = ["derive"] }
 [patch.crates-io]
 # change back to regular release after <https://github.com/Frostie314159/ieee80211-rs/pull/16>
 ieee80211 = { git = "https://github.com/Frostie314159/ieee80211-rs" }
-# change back to regular release after <https://github.com/esp-rs/esp-hal/commit/571760884bf90240fdace3afdfb7f527194681aa>
-esp-wifi = { git = "https://github.com/esp-rs/esp-hal" }
-esp-hal = { git = "https://github.com/esp-rs/esp-hal" }
-esp-alloc = { git = "https://github.com/esp-rs/esp-hal" }
-esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal" }
 # bitvec <1.1 isn't compatible with xtensa.
 # See https://github.com/ferrilab/ferrilab/issues/1
 bitvec = { version = ">=1.1", git = "https://github.com/ferrilab/ferrilab" }

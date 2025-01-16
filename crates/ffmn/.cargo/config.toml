@@ -3,7 +3,7 @@ runner = "espflash flash --monitor"
 
 [env]
 ESP_LOG = "INFO"
-ESP_WIFI_MAX_BURST_SIZE = "8"
+ESP_WIFI_CONFIG_MAX_BURST_SIZE = "8"
 
 [build]
 rustflags = [
