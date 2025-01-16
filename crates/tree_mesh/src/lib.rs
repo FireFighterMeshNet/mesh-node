@@ -180,13 +180,28 @@ fn resolve_next_hop(address: MACAddress) -> TreePos {
     })
 }
 
+/// All MACs to send to given the cause of the flood came from `rx_from`
+fn resolve_flood(rx_from: MACAddress) -> impl Iterator<Item = MACAddress> {
+    critical_section::with(|cs| {
+        let table = &mut *STATE.borrow_ref_mut(cs);
+        table
+            .map
+            .iter()
+            .filter(|x| *x.0 != rx_from) // don't flood loop.
+            .flat_map(|x| match x.1.postion {
+                // Nodes which are 1 level further and accessible by children are direct children.
+                TreePos::Down(child) if x.1.level == table.level() + 1 => Some(child),
+                _ => None,
+            })
+            // There is one parent
+            .chain(table.parent)
+            .collect::<heapless::Vec<_, { consts::MAX_NODES.next_power_of_two() }>>()
+            .into_iter()
+    })
+}
+
 fn next_hop_select_ap_sta<T>(address: MACAddress, ap: T, sta: T) -> (IpAddress, T) {
     let pos = resolve_next_hop(address);
-    if !smoltcp::wire::EthernetAddress(address.0).is_unicast() {
-        // TODO: broadcast address should broadcast to all children and parent.
-        // TODO: the least complicated multicast implementation falls back to broadcast and relies on nodes rejecting messages they aren't subscribed to.
-        todo!()
-    }
 
     // The ip depends on the node and the socket depends on if using sta (connected to parent) or ap (connected to children) interface.
     match pos {

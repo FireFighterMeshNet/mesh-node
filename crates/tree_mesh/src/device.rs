@@ -1,9 +1,9 @@
 //! Mesh overlay device.
 
-use crate::{next_hop_select_ap_sta, Packet};
+use crate::{next_hop_select_ap_sta, resolve_flood, Packet};
 use common::err;
 use embassy_futures::select::{select, Either};
-use embassy_net::{udp::UdpSocket, IpEndpoint, IpListenEndpoint};
+use embassy_net::{udp::UdpSocket, EthernetAddress, IpEndpoint, IpListenEndpoint};
 pub use embassy_net_driver_channel as ch;
 use ieee80211::mac_parser::MACAddress;
 use log::trace;
@@ -56,7 +56,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                         Either::First(()) => &mut self.ap_socket,
                         Either::Second(()) => &mut self.sta_socket,
                     };
-                    let (len, _meta) = match ready_socket.recv_from(rx_buf).await {
+                    let (len, meta) = match ready_socket.recv_from(rx_buf).await {
                         Ok(x) => x,
                         e @ Err(_) => {
                             err!(e, "received forward msg longer than MTU");
@@ -75,53 +75,91 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                     };
                     // Either deliver to overlay or forward on underlay network again depending on final destination.
                     let to_me = pkt.header.destination() == self.ap_mac;
+                    // Flooding on non-unicast is always valid even if inefficient.
+                    let flood = !EthernetAddress(pkt.header.destination().0).is_unicast();
+
+                    // TODO: make function
+                    macro_rules! send_to_next_hop {
+                        ($address:expr) => {{
+                            // Get which socket to use.
+                            let (ip, socket) = next_hop_select_ap_sta(
+                                $address,
+                                &mut self.ap_socket,
+                                &mut self.sta_socket,
+                            );
+                            // Send data to the next hop.
+                            err!(
+                                socket
+                                    .send_to(
+                                        &pkt.as_bytes(),
+                                        IpEndpoint {
+                                            addr: ip,
+                                            port: crate::consts::DATA_PORT,
+                                        },
+                                    )
+                                    .await
+                            );
+                        }};
+                    }
+
                     if to_me {
                         rx.rx_done(len);
+                    } else if flood {
+                        let embassy_net::IpAddress::Ipv6(rx_from) = meta.endpoint.addr else {
+                            err!(Err::<(), _>("non ipv6 udp received"));
+                            continue;
+                        };
+
+                        for node in resolve_flood(crate::consts::mac_from_sta_addr(rx_from)) {
+                            send_to_next_hop!(node)
+                        }
                     } else {
-                        // Get which socket to use.
-                        let (ip, socket) = next_hop_select_ap_sta(
-                            pkt.header.destination(),
-                            &mut self.ap_socket,
-                            &mut self.sta_socket,
-                        );
-                        // Send data to the next hop.
-                        err!(
-                            socket
-                                .send_to(
-                                    &pkt.as_bytes(),
-                                    IpEndpoint {
-                                        addr: ip,
-                                        port: crate::consts::DATA_PORT,
-                                    },
-                                )
-                                .await
-                        );
+                        send_to_next_hop!(pkt.header.destination());
                     }
                 }
                 Either::Second(tx_buf) => {
                     trace!("mesh tx buf");
                     let frame = EthernetFrame::new_unchecked(&tx_buf);
                     let dst = frame.dst_addr();
-                    // Use the tx_buf's mac destination as the final destination for the packet when forwarding. That is, the mac used by the overlay network matches the actual final destination mac.
-                    let (ip, socket) = next_hop_select_ap_sta(
-                        dst.0.into(),
-                        &mut self.ap_socket,
-                        &mut self.sta_socket,
-                    );
+                    // The mac used by the overlay network matches the actual final destination mac of the underlay network.
                     let pkt = Packet::new(dst.0.into(), tx_buf).unwrap();
-                    // TODO if the size is too large does this await forever (buffer never getting large enough)?
-                    err!(
-                        socket
-                            .send_to_with(
-                                pkt.measure_with(&()),
-                                IpEndpoint {
-                                    addr: ip,
-                                    port: crate::consts::DATA_PORT,
-                                },
-                                |buf| buf.pwrite(&pkt, 0),
-                            )
-                            .await
-                    );
+
+                    // TODO: make function
+                    macro_rules! send_to_next_hop {
+                        ($address:expr) => {{
+                            // Get which socket to use.
+                            let (ip, socket) = next_hop_select_ap_sta(
+                                $address,
+                                &mut self.ap_socket,
+                                &mut self.sta_socket,
+                            );
+                            // Send data to the next hop.
+                            // TODO if the size is too large does this await forever (buffer never getting large enough)?
+                            err!(
+                                socket
+                                    .send_to_with(
+                                        pkt.measure_with(&()),
+                                        IpEndpoint {
+                                            addr: ip,
+                                            port: crate::consts::DATA_PORT,
+                                        },
+                                        |buf| buf.pwrite(&pkt, 0),
+                                    )
+                                    .await
+                            );
+
+                        }};
+                    }
+
+                    // Flooding on non-unicast is always valid even if inefficient.
+                    let flood = !dst.is_unicast();
+                    if flood {
+                        for node in resolve_flood(self.ap_mac) {
+                            send_to_next_hop!(node)
+                        }
+                    } else {
+                        send_to_next_hop!(pkt.destination());
+                    }
                     tx.tx_done();
                 }
             }
