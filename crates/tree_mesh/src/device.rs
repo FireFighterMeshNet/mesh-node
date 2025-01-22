@@ -76,6 +76,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                     // Either deliver to overlay or forward on underlay network again depending on final destination.
                     let to_me = pkt.header.destination() == self.ap_mac;
                     // Flooding on non-unicast is always valid even if inefficient.
+                    // In other words this doesn't optimize multicast groups.
                     let flood = !EthernetAddress(pkt.header.destination().0).is_unicast();
 
                     // TODO: make function
@@ -99,20 +100,28 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                                     )
                                     .await
                             );
+                            socket.flush().await;
                         }};
                     }
 
                     if to_me {
+                        let data_range = pkt.data_range();
+                        rx_buf.copy_within(data_range, 0);
                         rx.rx_done(len);
                     } else if flood {
+                        trace!("flood from: {}", meta.endpoint);
                         let embassy_net::IpAddress::Ipv6(rx_from) = meta.endpoint.addr else {
                             err!(Err::<(), _>("non ipv6 udp received"));
                             continue;
                         };
 
                         for node in resolve_flood(crate::consts::mac_from_sta_addr(rx_from)) {
+                            trace!("flood forward to: {}", MACAddress(node.0));
                             send_to_next_hop!(node)
                         }
+                        let data_range = pkt.data_range();
+                        rx_buf.copy_within(data_range, 0);
+                        rx.rx_done(len);
                     } else {
                         send_to_next_hop!(pkt.header.destination());
                     }
@@ -147,14 +156,17 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                                     )
                                     .await
                             );
-
+                            socket.flush().await;
                         }};
                     }
 
                     // Flooding on non-unicast is always valid even if inefficient.
+                    // In other words this doesn't optimize multicast groups.
                     let flood = !dst.is_unicast();
                     if flood {
+                        trace!("flood from self");
                         for node in resolve_flood(self.ap_mac) {
+                            trace!("flood from self to: {}", MACAddress(node.0));
                             send_to_next_hop!(node)
                         }
                     } else {

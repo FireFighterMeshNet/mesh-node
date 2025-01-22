@@ -105,9 +105,8 @@ impl tree_mesh::simulator::IO for EspIO {
         config.as_mixed_conf_mut().0.bssid = Some(bssid.0);
         controller.set_configuration(&config).unwrap();
 
-        futures_lite::future::poll_once(controller.disconnect_async())
-            .await
-            .unwrap_or_log("disconnect unfinished");
+        let _ = embassy_futures::poll_once(controller.disconnect_async())
+            .map(|x| x.unwrap_or_log("disconnect unfinished"));
 
         let mut res = Ok(());
         for _ in 0..retries {

@@ -85,8 +85,11 @@ impl Packet<&[u8]> {
         size_of::<PacketHeader>() + PacketLen::MAX as usize
     }
 }
-impl<T: AsRef<[u8]>> Packet<T> {
-    pub fn new(destination: MACAddress, data: T) -> Result<Self, error::PacketNewErr> {
+impl<T: AsRef<[u8]> + ?Sized> Packet<T> {
+    pub fn new(destination: MACAddress, data: T) -> Result<Self, error::PacketNewErr>
+    where
+        T: Sized,
+    {
         Ok(Self {
             header: PacketHeader::new(destination, data.as_ref().len())?,
             data,
@@ -94,6 +97,11 @@ impl<T: AsRef<[u8]>> Packet<T> {
     }
     pub fn data(&self) -> &T {
         &self.data
+    }
+    /// The range of a [`[u8]`] that backs the [`Packet`] containing the data field.
+    /// Useful for [`<[u8]>::copy_within()`]
+    pub fn data_range(&self) -> impl core::ops::RangeBounds<usize> {
+        size_of::<PacketHeader>()..
     }
     pub fn destination(&self) -> MACAddress {
         self.header.destination()

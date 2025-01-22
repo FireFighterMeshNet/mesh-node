@@ -10,8 +10,15 @@ mod esp32_imp;
 
 use common::*;
 use core::{sync::atomic::AtomicU8, u8};
-use embassy_net::{tcp::TcpSocket, Runner, Stack, StackResources, StaticConfigV6};
+use embassy_futures::join::join;
+use embassy_net::{
+    driver::Driver,
+    tcp::TcpSocket,
+    udp::{PacketMetadata, UdpSocket},
+    IpEndpoint, IpListenEndpoint, Runner, Stack, StackResources, StaticConfigV6,
+};
 use embassy_time::{Duration, Timer, WithTimeout};
+use embedded_io_async::Write;
 use esp32_imp::{EspIO, SnifferWrapper};
 use esp_backtrace as _;
 use esp_hal::{
@@ -30,8 +37,16 @@ use esp_wifi::{
     EspWifiController,
 };
 use ieee80211::mac_parser::MACAddress;
+use log::warn;
 use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
-use tree_mesh::{simulator::IO, AsyncMutex, Packet};
+use tree_mesh::{
+    device::{
+        ch::{Device, State},
+        MeshRunner,
+    },
+    simulator::IO,
+    socket_force_closed, AsyncMutex,
+};
 
 mod consts {
     use ieee80211::mac_parser::MACAddress;
@@ -41,6 +56,11 @@ mod consts {
     // `MACAddress` of the root node
     // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
     pub const ROOT_MAC: MACAddress = MACAddress(ROOT_MAC_ARR);
+
+    // TODO synchronize this with the esp_config setting.
+    pub const MTU: usize = 1492;
+
+    pub const PORT: u16 = 6789;
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -66,6 +86,15 @@ async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>)
 #[embassy_executor::task]
 async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) -> ! {
     runner.run().await
+}
+
+/// Run the mesh overlay network stack.
+#[embassy_executor::task]
+async fn mesh_task(
+    mut stack_runner: Runner<'static, Device<'static, { consts::MTU }>>,
+    device_runner: MeshRunner<'static, { consts::MTU }>,
+) -> ! {
+    join(device_runner.run(), stack_runner.run()).await.0
 }
 
 #[embassy_executor::task]
@@ -249,6 +278,10 @@ async fn main(spawn: embassy_executor::Spawner) {
     assert_eq!(EspIO::ap_mac_to_sta(ap_mac), sta_mac);
     assert_eq!(EspIO::sta_mac_to_ap(sta_mac), ap_mac);
 
+    assert_eq!(
+        consts::MTU,
+        wifi_ap_interface.capabilities().max_transmission_unit
+    );
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
@@ -261,6 +294,10 @@ async fn main(spawn: embassy_executor::Spawner) {
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>::new()
         ),
         prng.gen(),
+    );
+    assert_eq!(
+        consts::MTU,
+        wifi_sta_interface.capabilities().max_transmission_unit
     );
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
@@ -288,105 +325,112 @@ async fn main(spawn: embassy_executor::Spawner) {
         .await
         .expect("ap up");
 
-    // Start TcpSockets.
-    macro_rules! forward_socket {
-        ($stack:ident) => {
-            let rx_socket = make_static!(
-                TcpSocket<'static>,
-                TcpSocket::new(
-                    $stack,
-                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-                )
-            );
-            let ap_tx_socket = make_static!(
-                TcpSocket<'static>,
-                TcpSocket::new(
-                    ap_stack,
-                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-                )
-            );
-            let sta_tx_socket = make_static!(
-                TcpSocket<'static>,
-                TcpSocket::new(
-                    sta_stack,
-                    make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-                    make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-                )
-            );
-            rx_socket.set_timeout(Some(Duration::from_secs(10)));
-            ap_tx_socket.set_timeout(Some(Duration::from_secs(10)));
-            sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
-            spawn.must_spawn(tree_mesh::accept_sta_and_forward(
-                rx_socket,
-                ap_mac,
-                ap_tx_socket,
-                sta_tx_socket,
-            ));
-        };
-    }
-    forward_socket!(ap_stack);
-    forward_socket!(ap_stack);
-    forward_socket!(sta_stack);
+    let ap_socket = UdpSocket::new(
+        ap_stack,
+        make_static!(
+            [PacketMetadata; tree_mesh::consts::MAX_NODES],
+            [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
+        ),
+        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!(
+            [PacketMetadata; tree_mesh::consts::MAX_NODES],
+            [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
+        ),
+        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+    );
+    let sta_socket = UdpSocket::new(
+        sta_stack,
+        make_static!(
+            [PacketMetadata; tree_mesh::consts::MAX_NODES],
+            [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
+        ),
+        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!(
+            [PacketMetadata; tree_mesh::consts::MAX_NODES],
+            [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
+        ),
+        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+    );
+    let (runner, mesh_device) = tree_mesh::device::ch::new(
+        make_static!(
+            State::<
+                { consts::MTU },
+                { tree_mesh::consts::MAX_NODES },
+                { tree_mesh::consts::MAX_NODES },
+            >,
+            State::new()
+        ),
+        embassy_net::driver::HardwareAddress::Ethernet(ap_mac.0),
+    );
+    let mesh_device_runner = MeshRunner {
+        runner,
+        ap_mac,
+        ap_socket,
+        sta_socket,
+    };
 
-    let sta_socket = make_static!(
+    let (mesh_stack, mesh_stack_runner) = embassy_net::new(
+        mesh_device,
+        embassy_net::Config::ipv6_static(StaticConfigV6 {
+            address: tree_mesh::consts::sta_cidr_from_mac(ap_mac),
+            gateway: Some(tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC).address()),
+            dns_servers: Default::default(),
+        }),
+        make_static!(StackResources::<1>, StackResources::<1>::new()),
+        prng.gen(),
+    );
+    spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
+
+    let mesh_tcp_socket = make_static!(
         TcpSocket<'static>,
         TcpSocket::new(
-            sta_stack,
+            mesh_stack,
             make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
             make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
         )
     );
-    sta_socket.set_timeout(Some(Duration::from_secs(10)));
-    let ap_socket = make_static!(
-        TcpSocket<'static>,
-        TcpSocket::new(
-            ap_stack,
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
-        )
-    );
-    ap_socket.set_timeout(Some(Duration::from_secs(10)));
+    mesh_tcp_socket.set_timeout(Some(Duration::from_secs(10)));
 
     if consts::TREE_LEVEL != Some(0) {
-        // DEBUG: connect to the ap and send a packet to a mac.
-        #[embassy_executor::task]
-        async fn f(
-            ap_socket: &'static mut TcpSocket<'static>,
-            sta_socket: &'static mut TcpSocket<'static>,
-        ) {
-            for _ in 0..10 {
-                let pkt = Packet::new(consts::ROOT_MAC, b"hello world 123").unwrap();
-
-                log::info!("send");
-                if let e @ Err(_) = pkt.send(&mut *ap_socket, &mut *sta_socket).await {
-                    err!(e);
-                };
-            }
-            tree_mesh::socket_force_closed(ap_socket).await;
-            tree_mesh::socket_force_closed(sta_socket).await;
+        loop {
+            err!(
+                mesh_tcp_socket
+                    .connect(IpEndpoint {
+                        addr: tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC)
+                            .address()
+                            .into(),
+                        port: consts::PORT,
+                    })
+                    .await
+            );
+            err!(mesh_tcp_socket.write_all(b"hello world 123").await);
+            err!(
+                mesh_tcp_socket
+                    .write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+                    .await
+            );
+            socket_force_closed(mesh_tcp_socket).await;
+            embassy_futures::yield_now().await;
         }
-        spawn.must_spawn(f(ap_socket, sta_socket));
     } else {
-        #[embassy_executor::task]
-        async fn f(ap_socket: &'static mut TcpSocket<'static>) {
-            Timer::after_secs(10).await;
+        loop {
             for _ in 0..10 {
-                let pkt = Packet::new(
-                    MACAddress([0xc6, 0xdd, 0x57, 0x75, 0xb3, 0x60]),
-                    b"hello world 123",
-                )
-                .unwrap();
-
-                log::info!("send");
-                if let e @ Err(_) = pkt.send(&mut *ap_socket, None).await {
-                    err!(e);
-                };
+                let mut buf = [0; 1024];
+                err!(
+                    mesh_tcp_socket
+                        .accept(IpListenEndpoint {
+                            addr: None,
+                            port: consts::PORT,
+                        })
+                        .await
+                );
+                if let Ok(len) = esp_println::dbg!(mesh_tcp_socket.read(&mut buf).await) {
+                    warn!("parent rxed {:?}", &buf[..len]);
+                } else {
+                    warn!("rx error")
+                }
+                socket_force_closed(mesh_tcp_socket).await;
             }
-            tree_mesh::socket_force_closed(ap_socket).await;
         }
-
-        spawn.must_spawn(f(ap_socket));
     }
 }

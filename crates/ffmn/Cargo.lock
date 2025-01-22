@@ -340,6 +340,7 @@ dependencies = [
  "embedded-io-async",
  "embedded-nal-async",
  "heapless 0.8.0",
+ "log",
  "managed",
  "smoltcp",
 ]
@@ -782,12 +783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastrand"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
-
-[[package]]
 name = "ffmn_nostd"
 version = "0.1.0"
 dependencies = [
@@ -795,6 +790,7 @@ dependencies = [
  "const-gen",
  "critical-section",
  "embassy-executor",
+ "embassy-futures",
  "embassy-net",
  "embassy-sync",
  "embassy-time",
@@ -806,7 +802,6 @@ dependencies = [
  "esp-hal-embassy",
  "esp-println",
  "esp-wifi",
- "futures-lite",
  "heapless 0.8.0",
  "ieee80211",
  "log",
@@ -851,17 +846,6 @@ name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
-
-[[package]]
-name = "futures-lite"
-version = "2.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5edaec856126859abb19ed65f39e90fea3a9574b9707f13539acf4abf7eb532"
-dependencies = [
- "fastrand",
- "futures-core",
- "pin-project-lite",
-]
 
 [[package]]
 name = "futures-sink"
@@ -1565,6 +1549,7 @@ dependencies = [
  "byteorder",
  "cfg-if",
  "heapless 0.8.0",
+ "log",
  "managed",
 ]
 
