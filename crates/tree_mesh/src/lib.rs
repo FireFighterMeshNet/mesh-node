@@ -21,7 +21,6 @@ pub mod node_data;
 pub mod packet;
 mod propagate_neighbors;
 pub mod simulator;
-mod socket_pool;
 
 #[cfg(test)]
 mod tests;
