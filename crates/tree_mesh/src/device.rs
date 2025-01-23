@@ -137,26 +137,31 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
 
                     // TODO: make function
                     macro_rules! send_to_next_hop {
-                        ($address:expr) => {{
+                        ($address:expr, $extra_ignore:expr) => {{
                             // Get which socket to use.
                             let (ip, socket) = next_hop_select_ap_sta(
                                 $address,
                                 &mut self.ap_socket,
                                 &mut self.sta_socket,
                             );
-                            // Send data to the next hop.
-                            trace!("sending to next hop {:?}", ip);
-                            err!(
-                                socket
-                                    .send_to(
-                                        &pkt.as_bytes(),
-                                        IpEndpoint {
-                                            addr: ip,
-                                            port: crate::consts::DATA_PORT,
-                                        },
-                                    )
-                                    .await
-                            );
+
+                            if $extra_ignore.into_iter().all(|x| x.addr != ip) {
+                                // Send data to the next hop.
+                                trace!("sending to next hop {:?}", ip);
+                                err!(
+                                    socket
+                                        .send_to(
+                                            &pkt.as_bytes(),
+                                            IpEndpoint {
+                                                addr: ip,
+                                                port: crate::consts::DATA_PORT,
+                                            },
+                                        )
+                                        .await
+                                );
+                            } else {
+                                trace!("not sending to next hop, ip resolved to an ignored address")
+                            }
                         }};
                     }
 
@@ -172,12 +177,12 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
 
                         for node in resolve_flood(crate::consts::mac_from_sta_addr(rx_from)) {
                             trace!("flood forward to: {}", MACAddress(node.0));
-                            send_to_next_hop!(node)
+                            send_to_next_hop!(node, Some(meta.endpoint))
                         }
                         rx_buf[..pkt.data.len()].copy_from_slice(&pkt.data);
                         rx.rx_done(pkt.data.len());
                     } else {
-                        send_to_next_hop!(pkt.header.destination());
+                        send_to_next_hop!(pkt.header.destination(), None::<IpEndpoint>);
                     }
                 }
                 Either::Second(tx_buf) => {

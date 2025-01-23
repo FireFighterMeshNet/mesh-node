@@ -407,29 +407,25 @@ async fn main(spawn: embassy_executor::Spawner) {
     );
     mesh_tcp_socket.set_timeout(Some(Duration::from_secs(10)));
 
-    if consts::TREE_LEVEL != Some(0) {
+    let send_to = todo!(
+        "enter ap_mac of node to send to. e.g. `MACAddress([0xaa, 0xbb, 0xcc, 0xcc, 0xdd, 0xee])`"
+    );
+    if consts::TREE_LEVEL != Some(0) && ap_mac != send_to {
         loop {
-            loop {
-                let res = mesh_tcp_socket
-                    .connect(IpEndpoint {
-                        addr: tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC)
-                            .address()
-                            .into(),
-                        port: consts::PORT,
-                    })
-                    .await;
-
-                err!(res);
-                err!(mesh_tcp_socket.write_all(b"hello world 123").await);
-                err!(
-                    mesh_tcp_socket
-                        .write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-                        .await
-                );
-                if res.is_ok() {
-                    break;
-                }
+            // Wait to connect.
+            while let Err(e) = mesh_tcp_socket
+                .connect(IpEndpoint {
+                    addr: tree_mesh::consts::sta_cidr_from_mac(send_to)
+                        .address()
+                        .into(),
+                    port: consts::PORT,
+                })
+                .await
+            {
+                err!(Err::<(), _>(e))
             }
+            // benchmark sending forwarded pkts
+            err!(mesh_tcp_socket.write_all(b"hello world 123").await);
             let start = Instant::now();
             for _ in 0..100 {
                 err!(esp_println::dbg!(
