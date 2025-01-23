@@ -17,7 +17,7 @@ use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     IpEndpoint, IpListenEndpoint, Runner, Stack, StackResources, StaticConfigV6,
 };
-use embassy_time::{Duration, Timer, WithTimeout};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use embedded_io_async::Write;
 use esp32_imp::{EspIO, SnifferWrapper};
 use esp_backtrace as _;
@@ -50,6 +50,7 @@ use tree_mesh::{
 
 mod consts {
     use ieee80211::mac_parser::MACAddress;
+    use tree_mesh::PacketHeader;
 
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
@@ -57,8 +58,31 @@ mod consts {
     // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
     pub const ROOT_MAC: MACAddress = MACAddress(ROOT_MAC_ARR);
 
+    // The size of headers in the ethernet payload for the underlying udp to transport the data.
+    pub const UDP_FORWARD_HEADER_LEN: usize = {
+        let out = smoltcp::wire::IPV6_HEADER_LEN
+            + smoltcp::wire::UDP_HEADER_LEN
+            + size_of::<PacketHeader>();
+        assert!(out == 56);
+        out
+    };
+    // The size of wrapped headers on tcp messages
+    pub const _: () = assert!(
+        smoltcp::wire::ETHERNET_HEADER_LEN
+            + smoltcp::wire::IPV6_HEADER_LEN
+            + smoltcp::wire::TCP_HEADER_LEN
+            == 74
+    );
+
     // TODO synchronize this with the esp_config setting.
-    pub const MTU: usize = 1492;
+    // TODO pr: embassy-net does'nt support ipv6 fragmentation but doesn't panic on too large payloads
+    // so a too big udp packet will panic
+    // Set the MTU here so the calculated max size including the final headers is less than the esp32 MTU
+    // TODO This is actually 4 bytes smaller than it needs to be (1436 instead of 1440) because esp-wifi uses 18 for ethernet size even though the header is only 14. I'm guessing it's because they are also counting the fcs as part of the ethernet header when it is shouldn't be.
+    // TODO pr to esp-wifi
+    pub const MTU: usize = 1492 // matching ESP32
+    // minus the headers
+    - UDP_FORWARD_HEADER_LEN;
 
     pub const PORT: u16 = 6789;
 }
@@ -245,7 +269,8 @@ async fn main(spawn: embassy_executor::Spawner) {
     esp_alloc::heap_allocator!(72_000);
 
     // Setup and configuration.
-    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let peripherals =
+        esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     let timer = TimerGroup::new(peripherals.TIMG0);
     esp_println::logger::init_logger_from_env();
     esp_hal_embassy::init(timer.timer0);
@@ -278,10 +303,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     assert_eq!(EspIO::ap_mac_to_sta(ap_mac), sta_mac);
     assert_eq!(EspIO::sta_mac_to_ap(sta_mac), ap_mac);
 
-    assert_eq!(
-        consts::MTU,
-        wifi_ap_interface.capabilities().max_transmission_unit
-    );
+    assert!(consts::MTU <= wifi_ap_interface.capabilities().max_transmission_unit);
     let (ap_stack, ap_runner) = embassy_net::new(
         wifi_ap_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
@@ -295,10 +317,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         ),
         prng.gen(),
     );
-    assert_eq!(
-        consts::MTU,
-        wifi_sta_interface.capabilities().max_transmission_unit
-    );
+    assert!(consts::MTU <= wifi_sta_interface.capabilities().max_transmission_unit);
     let (sta_stack, sta_runner) = embassy_net::new(
         wifi_sta_interface,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
@@ -331,12 +350,12 @@ async fn main(spawn: embassy_executor::Spawner) {
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
         make_static!(
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
     );
     let sta_socket = UdpSocket::new(
         sta_stack,
@@ -344,12 +363,12 @@ async fn main(spawn: embassy_executor::Spawner) {
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
         make_static!(
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
     );
     let (runner, mesh_device) = tree_mesh::device::ch::new(
         make_static!(
@@ -362,12 +381,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         ),
         embassy_net::driver::HardwareAddress::Ethernet(ap_mac.0),
     );
-    let mesh_device_runner = MeshRunner {
-        runner,
-        ap_mac,
-        ap_socket,
-        sta_socket,
-    };
+    let mesh_device_runner = MeshRunner::new(runner, ap_mac, ap_socket, sta_socket);
 
     let (mesh_stack, mesh_stack_runner) = embassy_net::new(
         mesh_device,
@@ -385,29 +399,48 @@ async fn main(spawn: embassy_executor::Spawner) {
         TcpSocket<'static>,
         TcpSocket::new(
             mesh_stack,
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)]),
+            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)])
         )
     );
     mesh_tcp_socket.set_timeout(Some(Duration::from_secs(10)));
 
     if consts::TREE_LEVEL != Some(0) {
         loop {
-            err!(
-                mesh_tcp_socket
+            loop {
+                let res = mesh_tcp_socket
                     .connect(IpEndpoint {
                         addr: tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC)
                             .address()
                             .into(),
                         port: consts::PORT,
                     })
-                    .await
-            );
-            err!(mesh_tcp_socket.write_all(b"hello world 123").await);
-            err!(
-                mesh_tcp_socket
-                    .write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-                    .await
+                    .await;
+
+                err!(res);
+                err!(mesh_tcp_socket.write_all(b"hello world 123").await);
+                err!(
+                    mesh_tcp_socket
+                        .write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+                        .await
+                );
+                if res.is_ok() {
+                    break;
+                }
+            }
+            let start = Instant::now();
+            for _ in 0..100 {
+                err!(esp_println::dbg!(
+                    mesh_tcp_socket.write_all(&[0; 2024]).await
+                ));
+            }
+            err!(mesh_tcp_socket.flush().await);
+            let end = Instant::now();
+            log::error!(
+                "\n{}ms elapsed transferring {}x{} bytes\n",
+                (end - start).as_millis(),
+                100,
+                2024
             );
             socket_force_closed(mesh_tcp_socket).await;
             embassy_futures::yield_now().await;
@@ -415,7 +448,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     } else {
         loop {
             for _ in 0..10 {
-                let mut buf = [0; 1024];
+                let mut buf = [0; consts::MTU];
                 err!(
                     mesh_tcp_socket
                         .accept(IpListenEndpoint {
@@ -424,10 +457,12 @@ async fn main(spawn: embassy_executor::Spawner) {
                         })
                         .await
                 );
-                if let Ok(len) = esp_println::dbg!(mesh_tcp_socket.read(&mut buf).await) {
-                    warn!("parent rxed {:?}", &buf[..len]);
-                } else {
-                    warn!("rx error")
+                while let Ok(len) = esp_println::dbg!(mesh_tcp_socket.read(&mut buf).await) {
+                    if len == 0 {
+                        // eof
+                        break;
+                    }
+                    warn!("parent rxed {:?}", &buf[..len.min(10)]);
                 }
                 socket_force_closed(mesh_tcp_socket).await;
             }

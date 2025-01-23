@@ -1,9 +1,10 @@
 use super::*;
-use zerocopy::IntoBytes;
+use zerocopy::{network_endian::U16, IntoBytes};
 
-pub type PacketLen = u8;
+pub type PacketLen = U16;
 #[derive(
     Debug,
+    Default,
     Clone,
     Copy,
     zerocopy::FromBytes,
@@ -82,7 +83,7 @@ impl<T: AsRef<[u8]>> scroll::ctx::MeasureWith<()> for Packet<T> {
 impl Packet<&[u8]> {
     /// Maximum size of a single packet.
     pub const fn max_size() -> usize {
-        size_of::<PacketHeader>() + PacketLen::MAX as usize
+        size_of::<PacketHeader>() + PacketLen::MAX_VALUE.get() as usize
     }
 }
 impl<T: AsRef<[u8]> + ?Sized> Packet<T> {

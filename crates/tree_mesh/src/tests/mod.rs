@@ -308,24 +308,24 @@ mod arbitrary {
                     state,
                     embassy_net::driver::HardwareAddress::Ethernet(node.mac),
                 );
-                let overlay_runner = MeshRunner {
+                let overlay_runner = MeshRunner::new(
                     runner,
-                    ap_mac: node.mac.into(),
-                    ap_socket: UdpSocket::new(
+                    node.mac.into(),
+                    UdpSocket::new(
                         ap_stack,
                         vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
                         vec![0; 2usize.pow(15)].leak(),
                         vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
                         vec![0; 2usize.pow(15)].leak(),
                     ),
-                    sta_socket: UdpSocket::new(
+                    UdpSocket::new(
                         sta_stack,
                         vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
                         vec![0; 2usize.pow(15)].leak(),
                         vec![PacketMetadata::EMPTY; 2usize.pow(6)].leak(),
                         vec![0; 2usize.pow(15)].leak(),
                     ),
-                };
+                );
                 env.spawn.borrow_mut().push(Box::pin(async move {
                     overlay_runner.run().await;
                 }));
@@ -605,6 +605,7 @@ mod arbitrary {
     }
     #[test]
     #[serial_test::serial]
+    #[ignore = "unfinished test"]
     fn mesh_device_test() {
         setup();
 

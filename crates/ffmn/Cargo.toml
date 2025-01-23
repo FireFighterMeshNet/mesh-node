@@ -54,7 +54,7 @@ zerocopy = { version = "0.8.9", features = ["derive"] }
 ieee80211 = { git = "https://github.com/Frostie314159/ieee80211-rs" }
 # bitvec <1.1 isn't compatible with xtensa.
 # See https://github.com/ferrilab/ferrilab/issues/1
-bitvec = { version = ">=1.1", git = "https://github.com/ferrilab/ferrilab" }
+# bitvec = { version = ">=1.1", git = "https://github.com/ferrilab/ferrilab" }
 
 [profile.dev]
 opt-level = "s"

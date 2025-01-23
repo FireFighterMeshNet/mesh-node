@@ -1807,8 +1807,3 @@ dependencies = [
  "quote",
  "syn 2.0.96",
 ]
-
-[[patch.unused]]
-name = "bitvec"
-version = "1.1.0"
-source = "git+https://github.com/ferrilab/ferrilab#68ab1dce6ad46442fe8681df75674737120ab115"

@@ -1,6 +1,6 @@
 //! Mesh overlay device.
 
-use crate::{next_hop_select_ap_sta, resolve_flood, Packet};
+use crate::{next_hop_select_ap_sta, packet::PacketLen, resolve_flood, Packet, PacketHeader};
 use common::err;
 use embassy_futures::select::{select, Either};
 use embassy_net::{udp::UdpSocket, EthernetAddress, IpEndpoint, IpListenEndpoint};
@@ -16,8 +16,46 @@ pub struct MeshRunner<'a, const MTU: usize> {
     pub ap_mac: MACAddress,
     pub ap_socket: UdpSocket<'a>,
     pub sta_socket: UdpSocket<'a>,
+    rx_staging_buf: Packet<[u8; MTU]>,
 }
 impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
+    pub fn new(
+        runner: ch::Runner<'d, MTU>,
+        ap_mac: MACAddress,
+        ap_socket: UdpSocket<'d>,
+        sta_socket: UdpSocket<'d>,
+    ) -> Self {
+        const {
+            assert!(
+                MTU <= PacketLen::MAX_VALUE.get() as usize,
+                "MTU of the mesh must be <= the max size of a `Packet` but is greater.",
+            )
+        }
+        let me = Self {
+            runner,
+            ap_mac,
+            ap_socket,
+            sta_socket,
+            rx_staging_buf: Packet::new(Default::default(), [0; MTU]).unwrap(),
+        };
+        assert!(
+            me.ap_socket.payload_recv_capacity() >= MTU + size_of::<PacketHeader>(),
+            "buffer provided to MeshRunner too small for MTU + PacketHeader"
+        );
+        assert!(
+            me.ap_socket.payload_recv_capacity() >= MTU + size_of::<PacketHeader>(),
+            "buffer provided to MeshRunner smaller than MTU + PacketHeader"
+        );
+        assert!(
+            me.sta_socket.payload_send_capacity() >= MTU + size_of::<PacketHeader>(),
+            "buffer provided to MeshRunner smaller than MTU + PacketHeader"
+        );
+        assert!(
+            me.sta_socket.payload_recv_capacity() >= MTU + size_of::<PacketHeader>(),
+            "buffer provided to MeshRunner smaller than MTU + PacketHeader"
+        );
+        me
+    }
     pub async fn run(mut self) -> ! {
         let (_state, mut rx, mut tx) = self.runner.split();
         self.ap_socket
@@ -56,7 +94,8 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                         Either::First(()) => &mut self.ap_socket,
                         Either::Second(()) => &mut self.sta_socket,
                     };
-                    let (len, meta) = match ready_socket.recv_from(rx_buf).await {
+                    let rx_staging = self.rx_staging_buf.as_mut_bytes();
+                    let (len, meta) = match ready_socket.recv_from(rx_staging).await {
                         Ok(x) => x,
                         e @ Err(_) => {
                             err!(e, "received forward msg longer than MTU");
@@ -64,7 +103,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                         }
                     };
                     // Get the wrapped packet.
-                    let pkt = match <Packet<[u8]>>::ref_from_bytes(&rx_buf[..len])
+                    let pkt = match <Packet<[u8]>>::ref_from_bytes(&rx_staging[..len])
                         .map_err(|e| SizeError::from(e))
                     {
                         Ok(pkt) => pkt,
@@ -89,6 +128,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                                 &mut self.sta_socket,
                             );
                             // Send data to the next hop.
+                            trace!("sending to next hop {:?}", ip);
                             err!(
                                 socket
                                     .send_to(
@@ -100,14 +140,12 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                                     )
                                     .await
                             );
-                            socket.flush().await;
                         }};
                     }
 
                     if to_me {
-                        let data_range = pkt.data_range();
-                        rx_buf.copy_within(data_range, 0);
-                        rx.rx_done(len);
+                        rx_buf[..pkt.data.len()].copy_from_slice(&pkt.data);
+                        rx.rx_done(pkt.data.len());
                     } else if flood {
                         trace!("flood from: {}", meta.endpoint);
                         let embassy_net::IpAddress::Ipv6(rx_from) = meta.endpoint.addr else {
@@ -119,9 +157,8 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                             trace!("flood forward to: {}", MACAddress(node.0));
                             send_to_next_hop!(node)
                         }
-                        let data_range = pkt.data_range();
-                        rx_buf.copy_within(data_range, 0);
-                        rx.rx_done(len);
+                        rx_buf[..pkt.data.len()].copy_from_slice(&pkt.data);
+                        rx.rx_done(pkt.data.len());
                     } else {
                         send_to_next_hop!(pkt.header.destination());
                     }
@@ -144,6 +181,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                             );
                             // Send data to the next hop.
                             // TODO if the size is too large does this await forever (buffer never getting large enough)?
+                            // TODO pr: yep, need to submit pr to embassy-net
                             err!(
                                 socket
                                     .send_to_with(
@@ -156,7 +194,6 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                                     )
                                     .await
                             );
-                            socket.flush().await;
                         }};
                     }
 
@@ -170,6 +207,7 @@ impl<'d, const MTU: usize> MeshRunner<'d, MTU> {
                             send_to_next_hop!(node)
                         }
                     } else {
+                        trace!("adding new packet to underlay network");
                         send_to_next_hop!(pkt.destination());
                     }
                     tx.tx_done();
