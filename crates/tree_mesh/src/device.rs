@@ -1,15 +1,32 @@
 //! Mesh overlay device.
 
+pub use embassy_net_driver_channel as ch;
+
 use crate::{next_hop_select_ap_sta, packet::PacketLen, resolve_flood, Packet, PacketHeader};
+use ch::{Device, State};
 use common::err;
 use embassy_futures::select::{select, Either};
-use embassy_net::{udp::UdpSocket, EthernetAddress, IpEndpoint, IpListenEndpoint};
-pub use embassy_net_driver_channel as ch;
+use embassy_net::{driver, udp::UdpSocket, EthernetAddress, IpEndpoint, IpListenEndpoint};
 use ieee80211::mac_parser::MACAddress;
 use log::trace;
 use scroll::{ctx::MeasureWith, Pwrite};
 use smoltcp::wire::EthernetFrame;
 use zerocopy::{FromBytes, IntoBytes, SizeError};
+
+/// Construct the mesh device and the runner which must be polled for the device to progress.
+pub fn new<'d, const MTU: usize, const N_RX: usize, const N_TX: usize>(
+    state: &'d mut State<MTU, N_RX, N_TX>,
+    hardware_address: driver::HardwareAddress,
+    ap_mac: MACAddress,
+    ap_socket: UdpSocket<'d>,
+    sta_socket: UdpSocket<'d>,
+) -> (Device<'d, MTU>, MeshRunner<'d, MTU>) {
+    let (runner, device) = ch::new(state, hardware_address);
+    (
+        device,
+        MeshRunner::new(runner, ap_mac, ap_socket, sta_socket),
+    )
+}
 
 pub struct MeshRunner<'a, const MTU: usize> {
     pub runner: ch::Runner<'a, MTU>,

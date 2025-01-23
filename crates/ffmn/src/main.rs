@@ -283,29 +283,29 @@ async fn main(spawn: embassy_executor::Spawner) {
         SmallRng::from_seed(buf)
     };
     spawn.must_spawn(feed_wdt());
+    // Log config.
     log::info!("TREE_LEVEL: {:?}", consts::TREE_LEVEL);
     log::info!("DENYLIST_MACS:",);
     for mac in consts::DENYLIST_MACS.into_iter().map(|x| MACAddress(*x)) {
         log::info!("{mac:?}")
     }
 
-    // Setup wifi.
+    // Setup wifi and log config.
     let init = make_static!(
         EspWifiController<'static>,
         esp_wifi::init(timer.timer1, rng, peripherals.RADIO_CLK).unwrap()
     );
-    let wifi = peripherals.WIFI;
-    let (wifi_ap_interface, wifi_sta_interface, controller) =
-        esp_wifi::wifi::new_ap_sta(&*init, wifi).unwrap();
-    let ap_mac = MACAddress(wifi_ap_interface.mac_address());
-    let sta_mac = MACAddress(wifi_sta_interface.mac_address());
+    let (wifi_ap_device, wifi_sta_device, controller) =
+        esp_wifi::wifi::new_ap_sta(&*init, peripherals.WIFI).unwrap();
+    let ap_mac = MACAddress(wifi_ap_device.mac_address());
+    let sta_mac = MACAddress(wifi_sta_device.mac_address());
     log::info!("ap_mac: {}; sta_mac: {}", ap_mac, sta_mac);
     assert_eq!(EspIO::ap_mac_to_sta(ap_mac), sta_mac);
     assert_eq!(EspIO::sta_mac_to_ap(sta_mac), ap_mac);
 
-    assert!(consts::MTU <= wifi_ap_interface.capabilities().max_transmission_unit);
+    assert!(consts::MTU <= wifi_ap_device.capabilities().max_transmission_unit);
     let (ap_stack, ap_runner) = embassy_net::new(
-        wifi_ap_interface,
+        wifi_ap_device,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: tree_mesh::consts::AP_CIDR,
             gateway: Some(tree_mesh::consts::AP_CIDR.address()),
@@ -313,13 +313,13 @@ async fn main(spawn: embassy_executor::Spawner) {
         }),
         make_static!(
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
-            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>::new()
+            StackResources::new()
         ),
         prng.gen(),
     );
-    assert!(consts::MTU <= wifi_sta_interface.capabilities().max_transmission_unit);
+    assert!(consts::MTU <= wifi_sta_device.capabilities().max_transmission_unit);
     let (sta_stack, sta_runner) = embassy_net::new(
-        wifi_sta_interface,
+        wifi_sta_device,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: tree_mesh::consts::sta_cidr_from_mac(ap_mac),
             gateway: Some(tree_mesh::consts::AP_CIDR.address()),
@@ -327,7 +327,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         }),
         make_static!(
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
-            StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>::new()
+            StackResources::new()
         ),
         prng.gen(),
     );
@@ -337,13 +337,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     spawn.must_spawn(boot_button_reply(peripherals.GPIO0));
     setup_connection(spawn, controller, ap_stack, sta_stack, ap_mac).await;
 
-    // Wait for AP stack to finish startup.
-    ap_stack
-        .wait_link_up()
-        .with_timeout(Duration::from_secs(5))
-        .await
-        .expect("ap up");
-
+    // Setup mesh overlay device.
     let ap_socket = UdpSocket::new(
         ap_stack,
         make_static!(
@@ -370,7 +364,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         ),
         make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
     );
-    let (runner, mesh_device) = tree_mesh::device::ch::new(
+    let (mesh_device, mesh_device_runner) = tree_mesh::device::new(
         make_static!(
             State::<
                 { consts::MTU },
@@ -380,9 +374,10 @@ async fn main(spawn: embassy_executor::Spawner) {
             State::new()
         ),
         embassy_net::driver::HardwareAddress::Ethernet(ap_mac.0),
+        ap_mac,
+        ap_socket,
+        sta_socket,
     );
-    let mesh_device_runner = MeshRunner::new(runner, ap_mac, ap_socket, sta_socket);
-
     let (mesh_stack, mesh_stack_runner) = embassy_net::new(
         mesh_device,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
@@ -390,10 +385,17 @@ async fn main(spawn: embassy_executor::Spawner) {
             gateway: Some(tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC).address()),
             dns_servers: Default::default(),
         }),
-        make_static!(StackResources::<1>, StackResources::<1>::new()),
+        make_static!(StackResources::<1>, StackResources::new()),
         prng.gen(),
     );
     spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
+
+    // Wait for AP stack to finish startup.
+    ap_stack
+        .wait_link_up()
+        .with_timeout(Duration::from_secs(5))
+        .await
+        .expect("ap up");
 
     let mesh_tcp_socket = make_static!(
         TcpSocket<'static>,
