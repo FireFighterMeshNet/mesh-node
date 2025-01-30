@@ -75,14 +75,27 @@ mod consts {
     );
 
     // TODO synchronize this with the esp_config setting.
-    // TODO pr: embassy-net does'nt support ipv6 fragmentation but doesn't panic on too large payloads
-    // so a too big udp packet will panic
     // Set the MTU here so the calculated max size including the final headers is less than the esp32 MTU
-    // TODO This is actually 4 bytes smaller than it needs to be (1436 instead of 1440) because esp-wifi uses 18 for ethernet size even though the header is only 14. I'm guessing it's because they are also counting the fcs as part of the ethernet header when it is shouldn't be.
-    // TODO pr to esp-wifi
-    pub const MTU: usize = 1492 // matching ESP32
+    // TODO This is actually 4 bytes smaller than it needs to be (1436 instead of 1440) because esp-wifi uses 18 for ethernet size even though the header is only 14. See <https://github.com/esp-rs/esp-hal/pull/3025>
+    pub const MTU: usize = 1492 // matching ESP32 ESP_WIFI_CONFIG_MTU
     // minus the headers
     - UDP_FORWARD_HEADER_LEN;
+
+    /// Maximum size of udp messages sent on overlayer on mesh.
+    pub const UDP_MESH_MTU: usize = MTU
+                                - smoltcp::wire::ETHERNET_HEADER_LEN // underlayer header
+                                - smoltcp::wire::ETHERNET_HEADER_LEN // overlayer header
+                                - smoltcp::wire::IPV6_HEADER_LEN // overlayer header
+                                - smoltcp::wire::UDP_HEADER_LEN // overlayer header
+                                ;
+
+    /*     /// Maximum size of tcp messages sent on overlayer on mesh.
+    pub const TCP_MESH_MTU: usize = MTU
+                                - smoltcp::wire::ETHERNET_HEADER_LEN // underlayer header
+                                - smoltcp::wire::ETHERNET_HEADER_LEN // overlayer header
+                                - smoltcp::wire::IPV6_HEADER_LEN // overlayer header
+                                - smoltcp::wire::TCP_HEADER_LEN // overlayer header
+                                ; */
 
     pub const PORT: u16 = 6789;
 }
