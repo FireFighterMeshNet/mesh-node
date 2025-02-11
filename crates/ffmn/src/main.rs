@@ -71,8 +71,7 @@ mod consts {
     );
 
     // TODO synchronize this with the esp_config setting.
-    // Set the MTU here so the calculated max size including the final headers is less than the esp32 MTU
-    // TODO This is actually 4 bytes smaller than it needs to be (1436 instead of 1440) because esp-wifi uses 18 for ethernet size even though the header is only 14. See <https://github.com/esp-rs/esp-hal/pull/3025>
+    // Set the MTU here so the calculated max size including the final headers is <= than the esp32 MTU
     pub const MTU: usize = 1492 // matching ESP32 ESP_WIFI_CONFIG_MTU
     // minus the headers
     - UDP_FORWARD_HEADER_LEN;

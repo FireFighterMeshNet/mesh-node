@@ -126,7 +126,6 @@ async fn update_from_msg(msg: PropagateNeighborMsg, child: MACAddress) {
 
 /// Drain requeued until the next message is out-of-order again.
 async fn drain_requeued() {
-    // Note: Don't lock `REQUEUED` and critical section at the same time to avoid thinking about deadlocks.
     while let Ok((msg, child)) = REQUEUED.try_receive() {
         if critical_section::with(|cs| {
             message_out_of_order(&mut *STATE.borrow_ref_mut(cs), msg, child)
