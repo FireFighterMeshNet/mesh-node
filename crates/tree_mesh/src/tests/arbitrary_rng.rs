@@ -30,6 +30,7 @@ impl RngUnstructured {
         self.0.len()
     }
     /// No entropy left.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
