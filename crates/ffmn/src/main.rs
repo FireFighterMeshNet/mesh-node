@@ -55,10 +55,11 @@ mod consts {
 
     // The size of headers in the ethernet payload for the underlying udp to transport the data.
     pub const UDP_FORWARD_HEADER_LEN: usize = {
-        let out = smoltcp::wire::IPV6_HEADER_LEN
+        let out = smoltcp::wire::ETHERNET_HEADER_LEN
+            + smoltcp::wire::IPV6_HEADER_LEN
             + smoltcp::wire::UDP_HEADER_LEN
             + size_of::<PacketHeader>();
-        assert!(out == 56);
+        assert!(out == 70);
         out
     };
     // The size of wrapped headers on tcp messages
@@ -78,19 +79,15 @@ mod consts {
 
     /// Maximum size of udp messages sent on overlayer on mesh.
     pub const UDP_MESH_MTU: usize = MTU
-                                - smoltcp::wire::ETHERNET_HEADER_LEN // underlayer header
-                                - smoltcp::wire::ETHERNET_HEADER_LEN // overlayer header
-                                - smoltcp::wire::IPV6_HEADER_LEN // overlayer header
-                                - smoltcp::wire::UDP_HEADER_LEN // overlayer header
-                                ;
+        - smoltcp::wire::ETHERNET_HEADER_LEN
+        - smoltcp::wire::IPV6_HEADER_LEN
+        - smoltcp::wire::UDP_HEADER_LEN;
 
-    /*     /// Maximum size of tcp messages sent on overlayer on mesh.
-    pub const TCP_MESH_MTU: usize = MTU
-                                - smoltcp::wire::ETHERNET_HEADER_LEN // underlayer header
-                                - smoltcp::wire::ETHERNET_HEADER_LEN // overlayer header
-                                - smoltcp::wire::IPV6_HEADER_LEN // overlayer header
-                                - smoltcp::wire::TCP_HEADER_LEN // overlayer header
-                                ; */
+    /// Maximum size of tcp messages sent on overlayer on mesh.
+    /* pub const TCP_MESH_MTU: usize = MTU
+    - smoltcp::wire::ETHERNET_HEADER_LEN
+    - smoltcp::wire::IPV6_HEADER_LEN
+    - smoltcp::wire::TCP_HEADER_LEN; */
 
     pub const PORT: u16 = 6789;
 }
