@@ -49,14 +49,9 @@ use tree_mesh::{
 };
 
 mod consts {
-    use ieee80211::mac_parser::MACAddress;
     use tree_mesh::PacketHeader;
 
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
-
-    // `MACAddress` of the root node
-    // TODO: pick this or TreeLevel == Some(0) as unique method of determining root.
-    pub const ROOT_MAC: MACAddress = MACAddress(ROOT_MAC_ARR);
 
     // The size of headers in the ethernet payload for the underlying udp to transport the data.
     pub const UDP_FORWARD_HEADER_LEN: usize = {
@@ -395,7 +390,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         mesh_device,
         embassy_net::Config::ipv6_static(StaticConfigV6 {
             address: tree_mesh::consts::sta_cidr_from_mac(ap_mac),
-            gateway: Some(tree_mesh::consts::sta_cidr_from_mac(consts::ROOT_MAC).address()),
+            gateway: None,
             dns_servers: Default::default(),
         }),
         make_static!(StackResources::<1>, StackResources::new()),

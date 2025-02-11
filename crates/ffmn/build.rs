@@ -21,10 +21,6 @@ fn main() {
             /// Deny listed macs (mostly for debugging) (don't connect to these)
             pub DENYLIST_MACS = parse_mac_list("DENYLIST_MACS").as_slice()
         ),
-        const_declaration!(
-            /// Root MAC as an array.
-            pub ROOT_MAC_ARR = parse_mac_list("ROOT_MAC").first().expect("ROOT_MAC should be set")
-        ),
     ]
     .join("\n");
 

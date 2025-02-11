@@ -24,7 +24,6 @@ After following installation you should have `cargo` and `espflash` (if the seco
 - `dump-packets` emits packets to uart debug interface for use in the wifishark extcap. Slows wifi down.
 
 ## Environment Variables
-- `ROOT_MAC`: MAC address of root node.
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
