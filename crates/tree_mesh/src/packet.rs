@@ -1,5 +1,5 @@
 use super::*;
-use zerocopy::{network_endian::U16, IntoBytes};
+use zerocopy::network_endian::U16;
 
 pub type PacketLen = U16;
 #[derive(
@@ -109,29 +109,6 @@ impl<T: AsRef<[u8]> + ?Sized> Packet<T> {
     }
     pub fn set_destination(&mut self, destination: MACAddress) {
         self.header.set_destination(destination);
-    }
-
-    pub async fn send<'a>(
-        &self,
-        ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-        sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-    ) -> Result<(), error::PacketSendErr> {
-        let dest = self.header.destination();
-
-        let socket = next_hop_socket_connected(dest, ap_tx_socket, sta_tx_socket)
-            .await
-            .ok_or(error::PacketSendErr::NextHopMissing)?;
-
-        socket
-            .write_all(self.header.as_bytes())
-            .await
-            .map_err(|e| error::PacketSendErr::Tcp { source: e })?;
-        socket
-            .write_all(self.data.as_ref())
-            .await
-            .map_err(|e| error::PacketSendErr::Tcp { source: e })?;
-
-        Ok(())
     }
 }
 impl<T: AsRef<[u8]> + AsMut<[u8]>> Packet<T> {

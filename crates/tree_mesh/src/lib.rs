@@ -28,12 +28,9 @@ mod tests;
 pub use packet::{Packet, PacketHeader};
 
 use common::{err, UnwrapExt};
-use core::{cell::RefCell, marker::PhantomData, ops::AsyncFnMut};
+use core::{cell::RefCell, marker::PhantomData};
 use critical_section::Mutex;
-use embassy_net::{
-    tcp::{TcpReader, TcpSocket},
-    IpAddress, IpEndpoint, IpListenEndpoint,
-};
+use embassy_net::{tcp::TcpSocket, IpAddress, IpEndpoint};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel as ChannelRaw, Receiver, Sender},
@@ -51,7 +48,7 @@ use ieee80211::{
     mgmt_frame::BeaconFrame,
 };
 use node_data::{NodeData, NodeDataBeaconMsg, NodeTable};
-use scroll::{ctx::SizeWith, Pread, Pwrite};
+use scroll::{Pread, Pwrite};
 use simulator::*;
 
 pub type Version = u8;
@@ -76,78 +73,6 @@ pub enum TreePos {
     /// Not connected to this node.
     #[default]
     Disconnected,
-}
-
-/// Send the given data, which fits in one packet, to the current parent.
-pub async fn send_to_parent(
-    data: &[u8],
-    ap_tx_socket: &mut TcpSocket<'static>,
-    sta_tx_socket: &mut TcpSocket<'static>,
-) -> Result<(), error::SendToParentErr> {
-    let pkt = Packet::new(
-        critical_section::with(|cs| STATE.borrow_ref_mut(cs).parent)
-            .ok_or(error::SendToParentErr::NoParent)?,
-        data,
-    )?;
-    pkt.send(ap_tx_socket, sta_tx_socket).await?;
-    Ok(())
-}
-
-/* TODO
-/// Send the given data packet to the given child.
-pub async fn send_to_child() -> Result<(), SendToChildErr> {
-    todo!()
-} */
-
-/// Accept connections on the socket and forward all [`Packet`]s received.
-#[embassy_executor::task(pool_size = consts::MAX_NODES)]
-pub async fn accept_sta_and_forward(
-    rx_socket: &'static mut TcpSocket<'static>,
-    ap_mac: MACAddress,
-    ap_tx_socket: &'static mut TcpSocket<'static>,
-    sta_tx_socket: &'static mut TcpSocket<'static>,
-) -> ! {
-    loop {
-        rx_socket.close();
-        err!(rx_socket.flush().await);
-        match rx_socket
-            .accept(IpListenEndpoint {
-                addr: None,
-                port: 8000,
-            })
-            .await
-        {
-            Ok(()) => (),
-            e @ Err(_) => {
-                err!(e);
-                log::warn!(
-                    "state: {}, local: {:?}, remote: {:?}",
-                    rx_socket.state(),
-                    rx_socket.local_endpoint(),
-                    rx_socket.remote_endpoint()
-                );
-                continue;
-            }
-        };
-
-        let (mut rx, _tx) = rx_socket.split();
-        match forward::<core::convert::Infallible>(
-            &mut rx,
-            ap_mac,
-            ap_tx_socket,
-            sta_tx_socket,
-            async |bytes| {
-                // TODO receive data for this node.
-                log::info!("[{}:{}] bytes = {:?}", file!(), line!(), bytes);
-                Ok(())
-            },
-        )
-        .await
-        {
-            Ok(()) => (),
-            Err(e) => match e {},
-        };
-    }
 }
 
 /// Close and flush, then abort socket.
@@ -206,130 +131,6 @@ fn next_hop_select_ap_sta<T>(address: MACAddress, ap: T, sta: T) -> (IpAddress, 
     match pos {
         TreePos::Up | TreePos::Disconnected => (consts::AP_CIDR.address().into(), sta),
         TreePos::Down(child_mac) => (consts::sta_cidr_from_mac(child_mac).address().into(), ap),
-    }
-}
-
-/// Connects using either ap (to child) or sta (to parent) interface to the node on the way to the given mac.
-/// Disconnects from previous if needed to connect to new.
-/// # Return
-/// If the selected socket was input as `None` the output will be `None`.
-async fn next_hop_socket_connected<'a>(
-    address: MACAddress,
-    ap_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-    sta_tx_socket: impl Into<Option<&'a mut TcpSocket<'static>>>,
-) -> Option<&'a mut TcpSocket<'static>> {
-    let ap_tx_socket: Option<&mut TcpSocket<'static>> = ap_tx_socket.into();
-    let sta_tx_socket: Option<&mut TcpSocket<'static>> = sta_tx_socket.into();
-
-    let (ip, tx_socket) = next_hop_select_ap_sta(address, ap_tx_socket, sta_tx_socket);
-    let tx_socket = tx_socket?;
-
-    // Connect to next-hop if not already connected.
-    if tx_socket.remote_endpoint() != Some(IpEndpoint::new(ip, consts::DATA_PORT)) {
-        // Disconnect old.
-        if tx_socket.remote_endpoint().is_some() {
-            socket_force_closed(tx_socket).await;
-        }
-        // Connect new.
-        err!(
-            tx_socket
-                .connect(IpEndpoint::new(ip, consts::DATA_PORT))
-                .await,
-            "connect to next hop"
-        );
-    }
-    Some(tx_socket)
-}
-
-/// Forward all [`Packet`]s received from `rx` to `tx_other` or `tx_me` based on destination.
-/// Sockets may not be closed when this returns.
-pub async fn forward<E>(
-    rx: &mut TcpReader<'_>,
-    ap_mac: MACAddress,
-    ap_tx_socket: &mut TcpSocket<'static>,
-    sta_tx_socket: &mut TcpSocket<'static>,
-    mut tx_me: impl AsyncFnMut(&[u8]) -> Result<(), E>,
-) -> Result<(), E> {
-    // Make sure if `Packet`'s length type is not `u8` this doesn't overflow flash.
-    const MAX_SIZE: usize = 1024;
-    // buffer can be `Packet::max_size()` or smaller, but no need for bigger
-    let mut buf = [0u8; {
-        if Packet::max_size() < MAX_SIZE {
-            Packet::max_size()
-        } else {
-            MAX_SIZE
-        }
-    }];
-
-    'packet: loop {
-        // Forward header.
-        match rx
-            .read_exact(&mut buf[..PacketHeader::size_with(&())])
-            .await
-        {
-            Ok(()) => (),
-            Err(e) => {
-                // If no data comes while expecting a header it is fine. Nothing needs to be fixed.
-                match e {
-                    embedded_io_async::ReadExactError::UnexpectedEof => break 'packet Ok(()),
-                    embedded_io_async::ReadExactError::Other(e) => {
-                        log::trace!("{e:?} waiting for header");
-                        break 'packet Ok(());
-                    }
-                }
-            }
-        }
-        let header = buf.pread::<PacketHeader>(0).unwrap();
-        let mut bytes_left = header.len();
-        let to_me = header.destination() == ap_mac;
-        // Forward header and choose correct socket if the data is not for this node.
-        let mut tx_socket = if to_me {
-            None
-        } else {
-            // Connect to next hop socket and disconnect from previous if needed.
-            let tx_socket = next_hop_socket_connected(
-                header.destination(),
-                &mut *ap_tx_socket,
-                &mut *sta_tx_socket,
-            )
-            .await
-            .unwrap();
-            // Send data to next-hop.
-            err!(
-                tx_socket
-                    .write_all(&buf[..PacketHeader::size_with(&())])
-                    .await,
-                "next hop failed write"
-            );
-            Some(tx_socket)
-        };
-
-        // Forward data.
-        loop {
-            let to_read = buf.len().min(bytes_left);
-            match rx.read_exact(&mut buf[..to_read]).await {
-                Ok(()) => (),
-                // TODO: Disconnect while expecting more data. This will result in lost data.
-                // At the very least, should probably send `bytes_left` filler to resync the forwarded data.
-                // Better would be to use framing (e.g. COBS).
-                e @ Err(_) => e.todo_msg("incomplete packet: data missing"),
-            };
-            match &mut tx_socket {
-                // Send data to next-hop.
-                Some(tx_socket) => {
-                    err!(
-                        tx_socket.write_all(&buf[..to_read]).await,
-                        "next hop failed write"
-                    );
-                }
-                // Sending to self
-                None => tx_me(&buf[..to_read]).await?,
-            }
-            bytes_left -= to_read;
-            if bytes_left == 0 {
-                break;
-            }
-        }
     }
 }
 

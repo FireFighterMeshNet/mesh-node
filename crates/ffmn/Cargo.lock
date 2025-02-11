@@ -1603,7 +1603,6 @@ dependencies = [
  "common",
  "const-gen",
  "critical-section",
- "embassy-executor",
  "embassy-futures",
  "embassy-net",
  "embassy-net-driver-channel",
