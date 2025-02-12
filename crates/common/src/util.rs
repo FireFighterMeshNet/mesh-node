@@ -74,11 +74,23 @@ pub trait UnwrapExt {
 impl<T> UnwrapExt for Option<T> {
     type T = T;
 
+    #[track_caller]
     fn todo(self) -> Self::T {
-        self.unwrap_or_else(|| todo!())
+        // `track_caller` on closures is unstable so can't use `unwrap_or_else`
+        // <https://github.com/rust-lang/rust/issues/87417>
+        match self {
+            Some(x) => x,
+            None => todo!(),
+        }
     }
+    #[track_caller]
     fn todo_msg(self, msg: &str) -> Self::T {
-        self.unwrap_or_else(|| todo!("{msg}"))
+        // `track_caller` on closures is unstable so can't use `unwrap_or_else`
+        // <https://github.com/rust-lang/rust/issues/87417>
+        match self {
+            Some(x) => x,
+            None => todo!("{msg}"),
+        }
     }
     /// Unwrap type or log as error.
     fn unwrap_or_log(self, msg: impl core::fmt::Display) {
@@ -87,14 +99,26 @@ impl<T> UnwrapExt for Option<T> {
         }
     }
 }
-impl<T, E> UnwrapExt for Result<T, E> {
+impl<T, E: core::fmt::Debug> UnwrapExt for Result<T, E> {
     type T = T;
 
+    #[track_caller]
     fn todo(self) -> Self::T {
-        self.unwrap_or_else(|_| todo!())
+        // `track_caller` on closures is unstable so can't use `unwrap_or_else`
+        // <https://github.com/rust-lang/rust/issues/87417>
+        match self {
+            Ok(x) => x,
+            Err(e) => todo!("{e:?}"),
+        }
     }
+    #[track_caller]
     fn todo_msg(self, msg: &str) -> Self::T {
-        self.unwrap_or_else(|_| todo!("{msg}"))
+        // `track_caller` on closures is unstable so can't use `unwrap_or_else`
+        // <https://github.com/rust-lang/rust/issues/87417>
+        match self {
+            Ok(x) => x,
+            Err(e) => todo!("{e:?}: {msg}"),
+        }
     }
     fn unwrap_or_log(self, msg: impl core::fmt::Display) {
         if self.is_err() {
