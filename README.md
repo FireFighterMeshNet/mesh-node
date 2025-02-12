@@ -42,6 +42,7 @@ See the `build.rs` for details.
 - Stack overflow hangs instead of crashing and restarting even with watchdog enabled.
     - <https://github.com/espressif/esp-idf/issues/10110>
 - If you get a ``linking with `xtensa-esp32-elf-gcc` failed ... undefined reference to ...`` then you likely need to enable a feature in the corresponding crate to provide the function (e.g. `_embassy_time_schedule_wake` comes from `generic-queue` in `embassy-time` or `integrated-timers` in `embassy-executor`)
+    - Alternatively, the symbols might have been stripped out. I noticed this in the case of the `coex` feature enabled without using any ble functions.
 - Invalid rustc version: Update rustc. If using `espup` you might have to specify a specific version with `espup install -v <version>` e.g. `espup install -v 1.84.0`
 - CP2102 USB to UART Bridge Controller device missing drivers
     - Get them from <https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers>
