@@ -49,8 +49,6 @@ use tree_mesh::{
 };
 
 mod consts {
-    use tree_mesh::PacketHeader;
-
     include!(concat!(env!("OUT_DIR"), "/const_gen.rs"));
 
     // The size of headers in the ethernet payload for the underlying udp to transport the data.
@@ -58,7 +56,7 @@ mod consts {
         let out = smoltcp::wire::ETHERNET_HEADER_LEN
             + smoltcp::wire::IPV6_HEADER_LEN
             + smoltcp::wire::UDP_HEADER_LEN
-            + size_of::<PacketHeader>();
+            + size_of::<tree_mesh::PacketHeader>();
         assert!(out == 70);
         out
     };
@@ -77,6 +75,7 @@ mod consts {
     - UDP_FORWARD_HEADER_LEN;
 
     /// Maximum size of udp messages sent on overlayer on mesh.
+    #[allow(dead_code)]
     pub const UDP_MESH_MTU: usize = MTU
         - smoltcp::wire::ETHERNET_HEADER_LEN
         - smoltcp::wire::IPV6_HEADER_LEN
@@ -137,8 +136,8 @@ async fn tree_mesh_task(
         TcpSocket<'static>,
         TcpSocket::new(
             ap_stack,
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+            make_static!(const [u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!(const [u8; 2usize.pow(8)], [0; 2usize.pow(8)])
         )
     );
     ap_rx_socket.set_timeout(Some(Duration::from_secs(10)));
@@ -147,8 +146,8 @@ async fn tree_mesh_task(
         TcpSocket<'static>,
         TcpSocket::new(
             sta_stack,
-            make_static!([u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
-            make_static!([u8; 2usize.pow(8)], [0; 2usize.pow(8)])
+            make_static!(const [u8; 2usize.pow(10)], [0; 2usize.pow(10)]),
+            make_static!(const [u8; 2usize.pow(8)], [0; 2usize.pow(8)])
         )
     );
     sta_tx_socket.set_timeout(Some(Duration::from_secs(10)));
@@ -265,12 +264,36 @@ async fn feed_wdt() -> ! {
     }
 }
 
+/// Initialize a global heap allocator providing a heap of the given size in
+/// bytes
+#[macro_export]
+macro_rules! heap_allocator {
+    ($(#[$m:meta])* size: $size:expr) => {{
+        $(#[$m])*
+        static mut HEAP: core::mem::MaybeUninit<[u8; $size]> = core::mem::MaybeUninit::uninit();
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+                HEAP.as_mut_ptr() as *mut u8,
+                $size,
+                esp_alloc::MemoryCapability::Internal.into(),
+            ));
+        }
+    }};
+}
+
 #[esp_hal_embassy::main]
 async fn main(spawn: embassy_executor::Spawner) {
     // Provides #[global_allocator] with given number of bytes.
-    // Bigger value here means smaller space left for stack.
+    // Bigger value here means smaller space left for stack if linked in dram_seg, as is done by default.
     // `esp-wifi` recommends at least `92k` for `coex` and `72k` for wifi.
-    esp_alloc::heap_allocator!(72_000);
+    heap_allocator!(
+        // Use dram2_seg and the bootloader memory.
+        // See the linker and memory layout files <https://github.com/esp-rs/esp-hal/tree/main/esp-hal/ld/esp32> and the pr <https://github.com/esp-rs/esp-hal/pull/2079>
+        #[link_section = ".dram2_uninit"]
+        size: 98767 // max size of dram2_seg esp32
+    );
 
     // Setup and configuration.
     let peripherals =
@@ -315,7 +338,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             gateway: Some(tree_mesh::consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
-        make_static!(
+        make_static!(const
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
@@ -329,7 +352,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             gateway: Some(tree_mesh::consts::AP_CIDR.address()),
             dns_servers: Default::default(),
         }),
-        make_static!(
+        make_static!(const
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
@@ -344,32 +367,32 @@ async fn main(spawn: embassy_executor::Spawner) {
     // Setup mesh overlay device.
     let ap_socket = UdpSocket::new(
         ap_stack,
-        make_static!(
+        make_static!(const
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
-        make_static!(
+        make_static!(const [u8; consts::MTU * 3], [0; consts::MTU * 3]),
+        make_static!(const
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
+        make_static!(const [u8; consts::MTU * 3], [0; consts::MTU * 3]),
     );
     let sta_socket = UdpSocket::new(
         sta_stack,
-        make_static!(
+        make_static!(const
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
-        make_static!(
+        make_static!(const [u8; consts::MTU * 3], [0; consts::MTU * 3]),
+        make_static!(const
             [PacketMetadata; tree_mesh::consts::MAX_NODES],
             [PacketMetadata::EMPTY; tree_mesh::consts::MAX_NODES]
         ),
-        make_static!([u8; consts::MTU * 3], [0; consts::MTU * 3]),
+        make_static!(const [u8; consts::MTU * 3], [0; consts::MTU * 3]),
     );
     let (mesh_device, mesh_device_runner) = tree_mesh::device::new(
-        make_static!(
+        make_static!(const
             State::<
                 { consts::MTU },
                 { tree_mesh::consts::MAX_NODES },
@@ -389,7 +412,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             gateway: None,
             dns_servers: Default::default(),
         }),
-        make_static!(StackResources::<1>, StackResources::new()),
+        make_static!(const StackResources::<1>, StackResources::new()),
         prng.gen(),
     );
     spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
@@ -405,8 +428,8 @@ async fn main(spawn: embassy_executor::Spawner) {
         TcpSocket<'static>,
         TcpSocket::new(
             mesh_stack,
-            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)]),
-            make_static!([u8; 2usize.pow(12)], [0; 2usize.pow(12)])
+            make_static!(const [u8; 2usize.pow(12)], [0; 2usize.pow(12)]),
+            make_static!(const [u8; 2usize.pow(12)], [0; 2usize.pow(12)])
         )
     );
     mesh_tcp_socket.set_timeout(Some(Duration::from_secs(10)));
@@ -464,7 +487,7 @@ async fn main(spawn: embassy_executor::Spawner) {
                         // eof
                         break;
                     }
-                    warn!("parent rxed {:?}", &buf[..len.min(10)]);
+                    warn!("rxed {:?}", &buf[..len.min(10)]);
                 }
                 socket_force_closed(mesh_tcp_socket).await;
             }

@@ -7,6 +7,8 @@ use core::{future::Future, pin::Pin};
 /// Therefore, each instance can only be run once. Next runs will panic. The `static` can additionally be
 /// decorated with attributes, such as `#[link_section]`, `#[used]`, et al.
 ///
+/// If prefixed with `const` then uses a `static ConstStaticCell` to initialize the value at compile time to guarantee no runtime initialization cost and not intialized on the stack.
+///
 /// # Examples
 ///
 /// ```
@@ -15,19 +17,26 @@ use core::{future::Future, pin::Pin};
 ///
 /// // This attribute instructs the linker to allocate it in the external RAM's BSS segment.
 /// // This specific example is for ESP32S3 with PSRAM support.
-/// let buf = make_static!([u8; 4096], [0u8; 4096], #[link_section = ".ext_ram.bss.buf"]);
+/// let buf = make_static!(#[link_section = ".ext_ram.bss.buf"] [u8; 4096], [0u8; 4096]);
 ///
 /// // Multiple attributes can be supplied.
-/// let s = make_static!(usize, 0usize, #[used] #[export_name = "exported_symbol_name"]);
+/// let s = make_static!(#[used] #[export_name = "exported_symbol_name"] usize, 0usize);
+///
+/// // Better to prefix with `const` when possible to avoid initializing on stack and copying to final destination.
+/// let s = make_static!(const #[used] #[export_name = "exported_symbol_name"] usize, 0usize);
 /// # }
 /// ```
 #[macro_export]
 macro_rules! make_static {
-    ($t:ty, $val:expr) => ($crate::make_static!($t, $val,));
-    ($t:ty, $val:expr, $(#[$m:meta])*) => {{
+    ($(#[$m:meta])* $t:ty, $val:expr $(,)?) => {{
         $(#[$m])*
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
         STATIC_CELL.init_with(|| $val)
+    }};
+    (const $(#[$m:meta])* $t:ty, $val:expr $(,)?) => {{
+        $(#[$m])*
+        static STATIC_CELL: static_cell::ConstStaticCell<$t> = static_cell::ConstStaticCell::new($val);
+        STATIC_CELL.take()
     }};
 }
 
