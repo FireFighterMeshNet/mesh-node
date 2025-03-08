@@ -4,6 +4,7 @@ runner = "espflash flash --monitor"
 [env]
 ESP_LOG = "INFO"
 ESP_WIFI_CONFIG_MAX_BURST_SIZE = "8"
+TROUBLE_HOST_L2CAP_RX_QUEUE_SIZE = "4"
 
 [build]
 rustflags = [

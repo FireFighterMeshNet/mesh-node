@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+bt-hci = "0.2.0"
 common = { version = "0.1.0", path = "../common" }
 critical-section = "1.2.0"
 embassy-executor = { version = "0.7.0", features = ["nightly", "executor-thread", "executor-interrupt"] }
@@ -16,7 +17,7 @@ embassy-net = { version = "0.6.0", features = [
     "medium-ethernet", "proto-ipv6",
     # "dhcpv4",
 ] }
-embassy-sync = "0.6.1"
+embassy-sync = "0.6.2"
 embassy-time = { version = "0.4.0", features = ["generic-queue-64"] }
 embedded-io-async = "0.6.1"
 error_set = "0.7.0"
@@ -32,10 +33,10 @@ esp-hal-embassy = { version = "0.6.0", features = ["esp32", "log"] }
 esp-println = { version = "0.13.0", features = ["esp32", "log"] }
 esp-wifi = { version = "0.12.0", features = ["esp32",
     # "utils",
-    "wifi",
-    "sniffer",
+    "wifi", "sniffer",
+    "ble",
+    #"coex", # This actually seems to break coex? coex (bluetooth and wifi simultaneously) works fine without enabling this
     "log",
-    # "dump-packets",
     # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
 ] }
 heapless = "0.8.0"
@@ -47,6 +48,9 @@ scroll = { version = "0.12.0", default-features = false, features = ["derive"]}
 smoltcp = { version = "0.12.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-raw", "log"] }
 static_cell = "2.1.0"
 tree_mesh = { version = "0.1.0", path = "../tree_mesh" }
+#trouble-host = { git = "https://github.com/embassy-rs/trouble", version = "0.1.0", features = ["scan", "log"] }
+# TODO, after changes in ffmn_nostd are upstreamed and espressif releases 2024 edition of toolchain, use upstream instead of this fork
+trouble-host = { git = "https://github.com/Easyoakland/trouble/", version = "0.1.0", features = ["scan", "log"], branch = "ffmn_nostd" }
 zerocopy = { version = "0.8.9", features = ["derive"] }
 
 [patch.crates-io]

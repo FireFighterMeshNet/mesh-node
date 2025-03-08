@@ -8,8 +8,12 @@
 
 mod esp32_imp;
 
+use bt_hci::{
+    controller::ExternalController,
+    param::{AddrKind, BdAddr},
+};
 use common::*;
-use core::{sync::atomic::AtomicU8, u8};
+use core::{cell::RefCell, sync::atomic::AtomicU8, u8};
 use embassy_futures::join::join;
 use embassy_net::{
     driver::Driver,
@@ -31,6 +35,7 @@ use esp_hal::{
 };
 use esp_wifi::{
     self,
+    ble::controller::BleConnector,
     wifi::{
         Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiStaDevice,
     },
@@ -46,6 +51,10 @@ use tree_mesh::{
     },
     simulator::IO,
     socket_force_closed, AsyncMutex,
+};
+use trouble_host::{
+    gatt::GattClient,
+    prelude::{AdStructure, Central, Characteristic, ConnectParams, ScanConfig},
 };
 
 mod consts {
@@ -88,6 +97,32 @@ mod consts {
     - smoltcp::wire::TCP_HEADER_LEN; */
 
     pub const PORT: u16 = 6789;
+
+    pub const BLE_SLOTS: usize = 1;
+    pub const BLE_CONNECTIONS_MAX: usize = 1;
+    pub const BLE_L2CAP_CHANNELS_MAX: usize = 4;
+    pub const BLE_L2CAP_MTU: usize = 255;
+
+    // "0000180d-0000-1000-8000-00805f9b34fb"
+    // note that's the 128 bit version of the 16 bit `180d` characteristic
+    // See <https://stackoverflow.com/questions/36212020/how-can-i-convert-a-bluetooth-16-bit-service-uuid-into-a-128-bit-uuid>
+    // pub const BLE_SERIVCE_UUID_128: trouble_host::attribute::Uuid =
+    //     trouble_host::attribute::Uuid::Uuid128([
+    //         00, 00, 0x18, 0x0d, 00, 00, 0x10, 00, 0x80, 00, 00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
+    //     ]);
+    pub const BLE_SERIVCE_UUID_16: [u8; 2] = [0x0d, 0x18]; // reversed because ? maybe little endian
+    pub const BLE_SERIVCE_UUID_16_WRAPPED: trouble_host::attribute::Uuid =
+        trouble_host::attribute::Uuid::new_short(0x180d);
+    // pub const BLE_CHARACTERISTIC_UUID: trouble_host::attribute::Uuid =
+    //     trouble_host::attribute::Uuid::new_short(0x2a37);
+    pub const BLE_CHARACTERISTIC_UUID_LONG: fn() -> trouble_host::attribute::Uuid = || {
+        let mut arr = [
+            0x00, 0x00, 0x2A, 0x37, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b,
+            0x34, 0xfb,
+        ];
+        arr.reverse(); // switch to little endian.
+        trouble_host::attribute::Uuid::new_long(arr)
+    };
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
@@ -122,6 +157,162 @@ async fn mesh_task(
     device_runner: MeshRunner<'static, { consts::MTU }>,
 ) -> ! {
     join(device_runner.run(), stack_runner.run()).await.0
+}
+
+struct CustomBLEEventHandler {
+    candidate_peripheral: RefCell<Option<(AddrKind, BdAddr)>>,
+}
+impl CustomBLEEventHandler {
+    const fn new() -> Self {
+        Self {
+            candidate_peripheral: RefCell::new(None),
+        }
+    }
+}
+impl trouble_host::prelude::EventHandler for CustomBLEEventHandler {
+    fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {
+        log::info!("scan has {:?} elements", reports.len());
+        if self.candidate_peripheral.borrow().is_none() {
+            for report in reports.filter_map(Result::ok) {
+                log::info!("addr: {:x?}", report.addr);
+
+                for ad in AdStructure::decode(report.data) {
+                    let Ok(ad) = ad else { break };
+                    log::info!("ad structure: {:?}", ad);
+                    let AdStructure::ServiceUuids16(uuids) = ad else {
+                        continue;
+                    };
+                    if uuids.is_empty() {
+                        continue;
+                    }
+                    if uuids[0] == consts::BLE_SERIVCE_UUID_16 {
+                        log::info!("found match uuid");
+                        self.candidate_peripheral
+                            .borrow_mut()
+                            .replace((report.addr_kind, report.addr));
+                    }
+                }
+                log::info!("advertisement: {report:?}");
+            }
+        }
+    }
+}
+
+/// Run the ble stack
+#[embassy_executor::task]
+async fn ble_task(
+    event_handler: &'static CustomBLEEventHandler,
+    mut ble_runner: trouble_host::prelude::Runner<
+        'static,
+        ExternalController<esp_wifi::ble::controller::BleConnector<'static>, { consts::BLE_SLOTS }>,
+    >,
+) {
+    ble_runner.run_with_handler(event_handler).await.unwrap();
+}
+
+#[embassy_executor::task]
+async fn ble_connection(
+    event_handler: &'static CustomBLEEventHandler,
+    mut central: Central<'static, ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>>,
+    stack: &'static trouble_host::Stack<
+        'static,
+        ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>,
+    >,
+) {
+    let config = || trouble_host::prelude::ConnectConfig {
+        scan_config: ScanConfig {
+            filter_accept_list: &[],
+            // interval: Duration::from_millis(1349),
+            // window: Duration::from_millis(499),
+            active: true,
+            ..Default::default()
+        },
+        connect_params: ConnectParams::default(),
+    };
+    log::info!("scanning");
+    loop {
+        let mut scanner = trouble_host::scan::Scanner::new(central);
+        match scanner.scan(&config().scan_config).await {
+            Ok(session) => session.wait_idle().await,
+            e @ Err(_) => {
+                err!(e);
+                break;
+            }
+        };
+        central = scanner.into_inner();
+        let Some(new_address) = event_handler.candidate_peripheral.borrow_mut().take() else {
+            log::trace!("no new on scan");
+            continue;
+        };
+
+        let filter_list = [(new_address.0, &new_address.1)];
+        log::info!("connecting: {:?}", new_address);
+        let connection = match central
+            .connect(&{
+                let mut out = config();
+                out.scan_config.filter_accept_list = &filter_list;
+                out
+            })
+            .inspect("connect")
+            .await {
+                Ok(x) => x,
+                e @ Err(_) => {err!(e, "connect"); continue}
+            }
+            // .todo_msg("connect")
+            ;
+        log::info!(
+            "connection: {:x?} {:?} {:?} {:?}",
+            connection.peer_address(),
+            connection.role(),
+            connection.handle(),
+            connection.is_connected()
+        );
+        let client = GattClient::<_, 10, { consts::BLE_L2CAP_MTU }>::new(stack, &connection)
+            .await
+            .todo_msg("new gatt");
+        log::trace!("services by uuid");
+        let ((), ()) = join(async { client.task().await.todo() }, async {
+            let services = client
+                .services_by_uuid(&consts::BLE_SERIVCE_UUID_16_WRAPPED)
+                .inspect("services by uuid")
+                .with_timeout(Duration::from_millis(5000))
+                .await
+                .todo_msg("services timeout")
+                .todo_msg("services err");
+            log::info!("services {:?}", services);
+
+            assert_eq!(services.len(), 1, "todo: != 1");
+            let service = services.first().unwrap();
+            let characteristic: Characteristic<heapless::Vec<u8, 8>> = client
+                .characteristic_by_uuid(service, &consts::BLE_CHARACTERISTIC_UUID_LONG())
+                .await
+                .todo_msg("characteristic");
+            let mut listener = client
+                .subscribe(&characteristic, false)
+                .await
+                .todo_msg("subscribe");
+            let ((), ()) = join(
+                async {
+                    loop {
+                        let notification = listener.next().await;
+                        log::info!("notification: {:?}", notification.as_ref());
+                    }
+                },
+                async {
+                    /* loop {
+                        let mut buf = heapless::Vec::<u8, 8>::new();
+                        let len = client
+                            .read_characteristic(&characteristic, &mut buf)
+                            .await
+                            .todo_msg("read characteristic");
+                        log::info!("read val: {:?}", &buf[..len]);
+                    } */
+                },
+            )
+            .await;
+        })
+        .await;
+    }
 }
 
 #[embassy_executor::task]
@@ -187,7 +378,7 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
 }
 
 /// Setup both AP and STA.
-async fn setup_connection(
+async fn wifi_connection(
     spawn: embassy_executor::Spawner,
     mut controller: WifiController<'static>,
     ap_stack: Stack<'static>,
@@ -319,18 +510,38 @@ async fn main(spawn: embassy_executor::Spawner) {
     spawn.must_spawn(feed_wdt());
     // Log config.
     log::info!("TREE_LEVEL: {:?}", consts::TREE_LEVEL);
-    log::info!("DENYLIST_MACS:",);
+    log::info!("DENYLIST_MACS:");
     for mac in consts::DENYLIST_MACS.into_iter().map(|x| MACAddress(*x)) {
         log::info!("{mac:?}")
     }
 
-    // Setup wifi and log config.
+    // Setup wifi/ble and log config.
     let init = make_static!(
         EspWifiController<'static>,
         esp_wifi::init(timer.timer1, rng, peripherals.RADIO_CLK).unwrap()
     );
-    let (wifi_ap_device, wifi_sta_device, controller) =
+    let (wifi_ap_device, wifi_sta_device, wifi_controller) =
         esp_wifi::wifi::new_ap_sta(&*init, peripherals.WIFI).unwrap();
+    let ble_connector = esp_wifi::ble::controller::BleConnector::new(&*init, peripherals.BT);
+    let ble_resources = make_static!(const
+        trouble_host::HostResources::<
+            { consts::BLE_CONNECTIONS_MAX },
+            { consts::BLE_L2CAP_CHANNELS_MAX },
+            { consts::BLE_L2CAP_MTU },
+        >,
+        trouble_host::HostResources::new()
+    );
+    let ble_stack = make_static!(
+        trouble_host::Stack<
+            'static,
+            ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>,
+        >,
+        trouble_host::new(ExternalController::new(ble_connector), ble_resources,)
+            .set_random_address(trouble_host::Address {
+                kind: AddrKind::RANDOM,
+                addr: BdAddr::new(prng.gen()),
+            })
+    );
     let ap_mac = MACAddress(wifi_ap_device.mac_address());
     let sta_mac = MACAddress(wifi_sta_device.mac_address());
     log::info!("ap_mac: {}; sta_mac: {}", ap_mac, sta_mac);
@@ -369,7 +580,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     spawn.must_spawn(ap_task(ap_runner));
     spawn.must_spawn(sta_task(sta_runner));
     spawn.must_spawn(boot_button_reply(peripherals.GPIO0));
-    setup_connection(spawn, controller, ap_stack, sta_stack, ap_mac).await;
+    wifi_connection(spawn, wifi_controller, ap_stack, sta_stack, ap_mac).await;
 
     // Setup mesh overlay device.
     let ap_socket = UdpSocket::new(
@@ -424,6 +635,16 @@ async fn main(spawn: embassy_executor::Spawner) {
     );
     spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
 
+    let trouble_host::Host {
+        central,
+        runner,
+        peripheral: _,
+        ..
+    } = ble_stack.build();
+    let event_handler = &*make_static!(const CustomBLEEventHandler, CustomBLEEventHandler::new());
+    spawn.must_spawn(ble_task(event_handler, runner));
+    spawn.must_spawn(ble_connection(event_handler, central, ble_stack));
+
     // Wait for AP stack to finish startup.
     ap_stack
         .wait_link_up()
@@ -461,9 +682,9 @@ async fn main(spawn: embassy_executor::Spawner) {
             // benchmark sending forwarded pkts
             err!(mesh_tcp_socket.write_all(b"hello world 123").await);
             let start = Instant::now();
-            for _ in 0..100 {
+            for i in 0..100 {
                 err!(esp_println::dbg!(
-                    mesh_tcp_socket.write_all(&[0; 2024]).await
+                    mesh_tcp_socket.write_all(&[i; 2024]).await
                 ));
             }
             err!(mesh_tcp_socket.flush().await);
