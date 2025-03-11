@@ -233,12 +233,16 @@ async fn ble_connection(
     loop {
         let mut scanner = trouble_host::scan::Scanner::new(central);
         match scanner.scan(&config().scan_config).await {
-            Ok(session) => session.wait_idle().await,
+            Ok(session) => drop(session),
             e @ Err(_) => {
                 err!(e);
                 break;
             }
         };
+        // Hack: See <https://github.com/embassy-rs/trouble/pull/313>
+        // If you remove either `yield_now` connecting gives a `BleHost(Hci(Command Disallowed)` error.
+        embassy_futures::yield_now().await;
+        embassy_futures::yield_now().await;
         central = scanner.into_inner();
         let Some(new_address) = event_handler.candidate_peripheral.borrow_mut().take() else {
             log::trace!("no new on scan");
