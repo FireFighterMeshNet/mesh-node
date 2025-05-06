@@ -1,9 +1,23 @@
-//! Mesh algorithm similar to that used by esp-mesh. A tree is created and nodes connect to the neighbor closest to the root.
+//! Mesh algorithm similar to that used by esp-mesh. A routing tree is created and nodes connect to the neighbor closest to the root.
+//!
+//! Usage of this crate is expected to be primarily with the custom device in the [`device`] module.
+//!
+//! Each node maintains a [`NodeTable`] which tracks its local knowledge of the overall mesh. When a packet should be sent to a particular node its relative location in the mesh is determined locally and forwarded either up or down the tree as needed.
+//!
+//! Each node periodically sends out a beacon frame in [`beacon_vendor_tx`] with custom data in the vendor data field indicating its hop distance from the root (called "level") in the mesh. Nodes listen for these messages and attempt to connect to the node they have received a beacon from, which indicates it is closest to the root.
+//!
+//! The [`run`] function manages all background functions necessary for the mesh to run, except for [`sniffer_callback`] which must be called on the data of every raw ieee80211 frame that is sniffed by the [`Sniffer`].
+//!
+//! # Testing
+//! Some deterministic simulation tests can be found under the `test` file path.
+//!
+//! Run `cargo test` to check for breakage.
+
 #![no_std]
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
-#![feature(async_closure)] // not needed in 1.85
-
+#![feature(async_closure)] // not needed in 1.85. TODO remove when updating the toolchain.
+#![allow(rustdoc::private_intra_doc_links)] // Don't warn if links to private items exist.
 #[cfg(feature = "std")]
 #[macro_use]
 extern crate std;
@@ -83,6 +97,7 @@ pub async fn socket_force_closed(socket: &mut TcpSocket<'_>) {
     err!(socket.flush().await);
 }
 
+/// Determine where the next hop is, relative in the tree, based on the final destination mac `address`
 fn resolve_next_hop(address: MACAddress) -> TreePos {
     // Resolve next-hop.
     critical_section::with(|cs| {
@@ -124,6 +139,9 @@ fn resolve_flood(rx_from: MACAddress) -> impl Iterator<Item = MACAddress> {
     })
 }
 
+/// Determine based on the final destination mac `address`, what the next-hop should be.
+///
+/// Return the next-hop address and either `ap` or `sta` input arguments based on the address to use.
 fn next_hop_select_ap_sta<T>(address: MACAddress, ap: T, sta: T) -> (IpAddress, T) {
     let pos = resolve_next_hop(address);
 

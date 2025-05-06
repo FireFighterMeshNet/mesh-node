@@ -1,4 +1,64 @@
 //! Mesh overlay device.
+//!
+//! This device creates an "overlay" network which can be used to access different nodes in the mesh as though they are directly connected to this node. It does this by sending, receiving, and forwarding wrapped packets on an "underlay" network where nodes organize themselves into a tree-like connectivity and each node may not be directly accessible to each other.
+//!
+//! To use the mesh, the [`embassy_net`] types such as [`embassy_net::tcp::TcpSocket`] or [`embassy_net::udp::UdpSocket`], should be created with the device returned by [`new`].
+//!
+//! For example:
+//! ```no_run
+//! # use ieee80211::mac_parser::MACAddress;
+//! # use embassy_net::{udp::UdpSocket, tcp::TcpSocket};
+//! // Construct the mesh device.
+//! const MTU: usize = 1492; // With MTU of 1492 bytes
+//! const N_RX: usize = 3; // Max 3 buffered packets received (for bursts).
+//! const N_TX: usize = 3; // Max 3 buffered packets transmitted (for bursts).
+//! let state: &mut embassy_net_driver_channel::State::<MTU, N_RX, N_TX>;
+//! let address: embassy_net::driver::HardwareAddress;
+//! let ap_mac: MACAddress;
+//! let ap_socket: UdpSocket;
+//! let sta_socket: UdpSocket;
+//! # state = common::make_static!(const
+//! #             embassy_net_driver_channel::State::<MTU, N_RX, N_TX>,
+//! #             embassy_net_driver_channel::State::new()
+//! #         );
+//! # ap_mac = MACAddress::default();
+//! # address = embassy_net::driver::HardwareAddress::Ethernet(ap_mac.0);
+//! # ap_socket = unimplemented!();
+//! # sta_socket = unimplemented!();
+//! let (mesh_device, mesh_device_runner) = tree_mesh::device::new(
+//!     state,
+//!     address,
+//!     ap_mac,
+//!     ap_socket,
+//!     sta_socket,
+//! );
+//!
+//! // Create an embassy network stack on the mesh device.
+//! let stack_resources: &mut embassy_net::StackResources::<1>;
+//! let rng: u64;
+//! let config: embassy_net::Config;
+//! # rng = 0;
+//! # stack_resources = common::make_static!(const embassy_net::StackResources::<1>, embassy_net::StackResources::new());
+//! # config = embassy_net::Config::ipv6_static(embassy_net::StaticConfigV6 {
+//! #             address: tree_mesh::consts::sta_cidr_from_mac(ap_mac),
+//! #             gateway: None,
+//! #             dns_servers: Default::default(),
+//! #         });
+//! let (mesh_stack, mesh_stack_runner) = embassy_net::new(
+//!     mesh_device,
+//!     config,
+//!     stack_resources,
+//!     rng,
+//! );
+//!
+//! // Create a new socket on that network stack.
+//! let rx_buf: &mut [u8; {2usize.pow(12)}];
+//! # rx_buf = common::make_static!(const [u8; 2usize.pow(12)], [0; 2usize.pow(12)]);
+//! let tx_buf: &mut [u8; {2usize.pow(12)}];
+//! # tx_buf = common::make_static!(const [u8; 2usize.pow(12)], [0; 2usize.pow(12)]);
+//! let mesh_tcp_socket = TcpSocket::new(mesh_stack, rx_buf, tx_buf);
+//! ```
+//!
 
 pub use embassy_net_driver_channel as ch;
 
@@ -28,6 +88,7 @@ pub fn new<'d, const MTU: usize, const N_RX: usize, const N_TX: usize>(
     )
 }
 
+/// [`MeshRunner::run`] must be polled (or `await`ed) to progress the mesh device.
 pub struct MeshRunner<'a, const MTU: usize> {
     pub runner: ch::Runner<'a, MTU>,
     pub ap_mac: MACAddress,

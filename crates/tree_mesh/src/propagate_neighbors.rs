@@ -1,3 +1,9 @@
+//! Handle propagation of neighbor information in the mesh.
+//!
+//! This is how a node which is not directly connected to its destination knows where to send its packet.
+//!
+//! This forms connections only with direct neighbors, so regular TCP is sufficient to guarantee delivery.
+
 use super::*;
 use core::ops::ControlFlow;
 use embassy_futures::join::join;
@@ -33,8 +39,8 @@ impl PropagateNeighborMsg {
 /// Serialized child connection events so we don't have an ABA issue (node connects, disconnects, connects should end connected).
 static MAC_CHANGE_TO_TX: Channel<PropagateNeighborMsg, { consts::MAX_NODES * 2 }> = Channel::new();
 
-/// Messages that were received out-of-order and have to be handled later.
 type ChildThatSent = MACAddress;
+/// Messages that were received out-of-order and have to be handled later.
 static REQUEUED: Channel<(PropagateNeighborMsg, ChildThatSent), { consts::MAX_NODES * 2 }> =
     Channel::new();
 

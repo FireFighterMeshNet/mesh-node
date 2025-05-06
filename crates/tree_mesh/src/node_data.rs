@@ -83,12 +83,13 @@ pub struct NodeTable {
     /// Parent if connected.
     pub parent: Option<MACAddress>,
     /// The data for other nodes.
-    // `FnvIndexMap` has to be a power of two in size.
+    // [`FnvIndexMap`] has to be a power of two in size.
     pub map: FnvIndexMap<MACAddress, NodeData, { consts::MAX_NODES.next_power_of_two() }>,
 }
 impl NodeTable {
     /// Saturates at the furthest level from the root if self is disconnected.
-    // This enables the level of `self` to dynamically change as the parent's level changes.
+    ///
+    // Using this to access the current level means that the level of `self` dynamically changes as the parent's level changes and this is always up-to-date.
     pub fn level(&self) -> Level {
         if let Some(level) = consts::TREE_LEVEL {
             level

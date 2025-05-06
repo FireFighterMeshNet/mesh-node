@@ -16,7 +16,15 @@ Note: Modifies environment variables as indicated in the ps1 file saved to `%use
 After following installation you should have `cargo` and `espflash` (if the second is missing do `cargo install espflash`) installed so `cargo run --release` when the board is plugged in should work. If it hangs on `Connecting...` cancel the command (`Ctrl-c`) and try again or try pressing the `RESET` button of the development board.
 
 # Documentation
-`cargo doc --open` should open the documentation for all dependencies and the project in your browser.
+`cargo doc --open` should open the documentation for all dependencies and the project in your browser.\
+`cargo doc --open --document-private-items` will show extra documentation for private items.
+
+# Project Layout
+- `crates` contains the various [crates](https://doc.rust-lang.org/book/ch07-01-packages-and-crates.html) of the project.
+- The `tree_mesh` crate contains generic code for the maintaining and using the Wi-Fi mesh. This is mainly used by created a virtual device which forwards messages as needed based upon their ip address.
+    - This is generic so that the mesh algorithm algorithm can be tested in software for correctness.
+- The `ffmn` crate contains the integration crate which contains `fn main()`, uses `tree_mesh` for the mesh, sets up the board, configures the bluetooth, and generally has the specific code required for using the ESP32. This is what you should build and run to flash to the board.
+- `common` contains various code shared by the other crates.
 
 # Configuration
 
@@ -27,6 +35,7 @@ After following installation you should have `cargo` and `espflash` (if the seco
 - `SSID`: (optional) custom SSID of WIFI STA and AP connection.
 - `RNG_SEED`:  (optional) deterministic override of random seed.
 - `TREE_LEVEL`: (optional) overrides the level of the node to the given value in the tree mesh.
+    - For the mesh to organize correctly one node (no more or less) should run the software built with this environment variable set to `0`. That node is the unique root of the tree.
 - `DENYLIST_MACS`: (optional) comma seperated list of hex code mac address like `12:34:56:78:9a:bc,12:34:56:78:9a:de` to ignore and not connect to.
 
 See the `build.rs` for details.

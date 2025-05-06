@@ -1,1 +1,1 @@
-Mesh algorithm that works by creating a tree.
+Build and open the crate documentation with `cargo doc --open --document-private-items`

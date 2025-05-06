@@ -1,4 +1,7 @@
+//! Custom error types for this crate.
+
 error_set::error_set! {
+    /// Error creating a new [`crate::Packet`]
     PacketNewErr = {
         /// Too much data for one packet.
         #[display("data too large for one packet")]
