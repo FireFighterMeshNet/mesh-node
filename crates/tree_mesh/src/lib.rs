@@ -16,7 +16,6 @@
 #![no_std]
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
-#![feature(async_closure)] // not needed in 1.85. TODO remove when updating the toolchain.
 #![allow(rustdoc::private_intra_doc_links)] // Don't warn if links to private items exist.
 #[cfg(feature = "std")]
 #[macro_use]

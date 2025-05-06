@@ -37,7 +37,6 @@ esp-wifi = { version = "0.12.0", features = ["esp32",
     "ble",
     #"coex", # This actually seems to break coex? coex (bluetooth and wifi simultaneously) works fine without enabling this
     "log",
-    # TODO: "ble" or "coex" for bluetooth or both bluetooth and wifi respectively
 ] }
 heapless = "0.8.0"
 ieee80211 = "0.5.0"

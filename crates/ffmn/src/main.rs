@@ -1,6 +1,5 @@
 #![feature(impl_trait_in_assoc_type)] // needed for embassy's tasks on nightly for perfect sizing with generic `static`s
 #![feature(closure_lifetime_binder)] // for<'a> |&'a| syntax
-#![feature(async_closure)] // async || syntax
 #![no_std]
 #![no_main]
 
@@ -171,14 +170,14 @@ impl CustomBLEEventHandler {
 }
 impl trouble_host::prelude::EventHandler for CustomBLEEventHandler {
     fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {
-        log::info!("scan has {:?} elements", reports.len());
+        log::trace!("scan has {:?} elements", reports.len());
         if self.candidate_peripheral.borrow().is_none() {
             for report in reports.filter_map(Result::ok) {
-                log::info!("addr: {:x?}", report.addr);
+                log::trace!("addr: {:x?}", report.addr);
 
                 for ad in AdStructure::decode(report.data) {
                     let Ok(ad) = ad else { break };
-                    log::info!("ad structure: {:?}", ad);
+                    log::trace!("ad structure: {:?}", ad);
                     let AdStructure::ServiceUuids16(uuids) = ad else {
                         continue;
                     };
@@ -192,7 +191,7 @@ impl trouble_host::prelude::EventHandler for CustomBLEEventHandler {
                             .replace((report.addr_kind, report.addr));
                     }
                 }
-                log::info!("advertisement: {report:?}");
+                log::trace!("advertisement: {report:?}");
             }
         }
     }
