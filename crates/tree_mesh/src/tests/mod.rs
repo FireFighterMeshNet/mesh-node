@@ -215,7 +215,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.borrow_mut().gen(),
+                    env.rng.borrow_mut().r#gen(),
                 );
                 env.spawn
                     .borrow_mut()
@@ -228,7 +228,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.borrow_mut().gen(),
+                    env.rng.borrow_mut().r#gen(),
                 );
                 env.spawn
                     .borrow_mut()
@@ -285,7 +285,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.borrow_mut().gen(),
+                    env.rng.borrow_mut().r#gen(),
                 );
                 env.spawn
                     .borrow_mut()
@@ -298,7 +298,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.borrow_mut().gen(),
+                    env.rng.borrow_mut().r#gen(),
                 );
                 env.spawn
                     .borrow_mut()
@@ -337,7 +337,7 @@ mod arbitrary {
                         dns_servers: Default::default(),
                     }),
                     Box::leak(Box::new(StackResources::<16>::new())),
-                    env.rng.borrow_mut().gen(),
+                    env.rng.borrow_mut().r#gen(),
                 );
                 env.spawn.borrow_mut().push(Box::pin(async move {
                     overlay_runner.run().await;

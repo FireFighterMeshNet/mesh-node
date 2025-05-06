@@ -492,7 +492,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     heap_allocator!(
         // Use dram2_seg and the bootloader memory.
         // See the linker and memory layout files <https://github.com/esp-rs/esp-hal/tree/main/esp-hal/ld/esp32> and the pr <https://github.com/esp-rs/esp-hal/pull/2079>
-        #[link_section = ".dram2_uninit"]
+        #[unsafe(link_section = ".dram2_uninit")]
         size: 98767 // max size of dram2_seg esp32
     );
 
@@ -542,7 +542,7 @@ async fn main(spawn: embassy_executor::Spawner) {
         trouble_host::new(ExternalController::new(ble_connector), ble_resources,)
             .set_random_address(trouble_host::Address {
                 kind: AddrKind::RANDOM,
-                addr: BdAddr::new(prng.gen()),
+                addr: BdAddr::new(prng.r#gen()),
             })
     );
     let ap_mac = MACAddress(wifi_ap_device.mac_address());
@@ -563,7 +563,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
-        prng.gen(),
+        prng.r#gen(),
     );
     assert!(consts::MTU <= wifi_sta_device.capabilities().max_transmission_unit);
     let (sta_stack, sta_runner) = embassy_net::new(
@@ -577,7 +577,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
-        prng.gen(),
+        prng.r#gen(),
     );
 
     spawn.must_spawn(ap_task(ap_runner));
@@ -634,7 +634,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             dns_servers: Default::default(),
         }),
         make_static!(const StackResources::<1>, StackResources::new()),
-        prng.gen(),
+        prng.r#gen(),
     );
     spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
 
