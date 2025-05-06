@@ -21,10 +21,12 @@ After following installation you should have `cargo` and `espflash` (if the seco
 
 # Project Layout
 - `crates` contains the various [crates](https://doc.rust-lang.org/book/ch07-01-packages-and-crates.html) of the project.
-- The `tree_mesh` crate contains generic code for the maintaining and using the Wi-Fi mesh. This is mainly used by created a virtual device which forwards messages as needed based upon their ip address.
+- The `tree_mesh` crate contains generic code for maintaining and using the Wi-Fi mesh. This crate is mainly used by creating a virtual device which forwards messages as needed based upon their ip address.
     - This is generic so that the mesh algorithm algorithm can be tested in software for correctness.
 - The `ffmn` crate contains the integration crate which contains `fn main()`, uses `tree_mesh` for the mesh, sets up the board, configures the bluetooth, and generally has the specific code required for using the ESP32. This is what you should build and run to flash to the board.
 - `common` contains various code shared by the other crates.
+
+See more information for each crate suing the built documentation from `cargo doc`.
 
 # Configuration
 
