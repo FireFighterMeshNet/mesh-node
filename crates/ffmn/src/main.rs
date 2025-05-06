@@ -15,45 +15,43 @@ use common::*;
 use core::{cell::RefCell, sync::atomic::AtomicU8, u8};
 use embassy_futures::join::join;
 use embassy_net::{
+    IpEndpoint, IpListenEndpoint, Runner, Stack, StackResources, StaticConfigV6,
     driver::Driver,
     tcp::TcpSocket,
     udp::{PacketMetadata, UdpSocket},
-    IpEndpoint, IpListenEndpoint, Runner, Stack, StackResources, StaticConfigV6,
 };
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use embedded_io_async::Write;
-use esp32_imp::{EspIO, SnifferWrapper};
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::{GpioPin, Input},
+    gpio::{Input, InputConfig},
     handler,
     interrupt::InterruptConfigurable,
-    peripherals::TIMG0,
+    peripherals::{GPIO0, TIMG0},
     rng::Rng,
     timer::timg::{TimerGroup, Wdt},
 };
 use esp_wifi::{
-    self,
+    self, EspWifiController,
     ble::controller::BleConnector,
-    wifi::{
-        Configuration, PromiscuousPkt, WifiApDevice, WifiController, WifiDevice, WifiStaDevice,
-    },
-    EspWifiController,
+    wifi::{Configuration, Interfaces, PromiscuousPkt, WifiController, WifiDevice},
 };
+use esp32_imp::{EspIO, SnifferWrapper};
 use ieee80211::mac_parser::MACAddress;
 use log::warn;
-use rand::{rngs::SmallRng, Rng as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _, rngs::SmallRng};
 use tree_mesh::{
+    AsyncMutex,
     device::{
-        ch::{Device, State},
         MeshRunner,
+        ch::{Device, State},
     },
     simulator::IO,
-    socket_force_closed, AsyncMutex,
+    socket_force_closed,
 };
 use trouble_host::{
     gatt::GattClient,
-    prelude::{AdStructure, Central, Characteristic, ConnectParams, ScanConfig},
+    prelude::{AdStructure, Central, Characteristic, ConnectParams, DefaultPacketPool, ScanConfig},
 };
 
 mod consts {
@@ -122,12 +120,17 @@ mod consts {
         arr.reverse(); // switch to little endian.
         trouble_host::attribute::Uuid::new_long(arr)
     };
+
+    pub const MAX_SERVICES: usize = 2;
 }
 
 /// Display a message when the button is pressed to confirm the device is still responsive.
 #[embassy_executor::task]
-async fn boot_button_reply(gpio0: GpioPin<0>) -> ! {
-    let mut boot_button = Input::new(gpio0, esp_hal::gpio::Pull::None);
+async fn boot_button_reply(gpio0: GPIO0<'static>) -> ! {
+    let mut boot_button = Input::new(
+        gpio0,
+        InputConfig::default().with_pull(esp_hal::gpio::Pull::None),
+    );
 
     let mut i = 0u8;
     loop {
@@ -137,15 +140,9 @@ async fn boot_button_reply(gpio0: GpioPin<0>) -> ! {
     }
 }
 
-/// Run the AP network stack so the WifiAP responds to network events.
-#[embassy_executor::task]
-async fn ap_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) -> ! {
-    runner.run().await
-}
-
-/// Run the STA network stack so the WifiSta responds to network events.
-#[embassy_executor::task]
-async fn sta_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) -> ! {
+/// Run the Wifi Device so it responds network events.
+#[embassy_executor::task(pool_size = 2)]
+async fn wifi_device_task(mut runner: Runner<'static, WifiDevice<'static>>) -> ! {
     runner.run().await
 }
 
@@ -204,6 +201,7 @@ async fn ble_task(
     mut ble_runner: trouble_host::prelude::Runner<
         'static,
         ExternalController<esp_wifi::ble::controller::BleConnector<'static>, { consts::BLE_SLOTS }>,
+        DefaultPacketPool,
     >,
 ) {
     ble_runner.run_with_handler(event_handler).await.unwrap();
@@ -212,10 +210,15 @@ async fn ble_task(
 #[embassy_executor::task]
 async fn ble_connection(
     event_handler: &'static CustomBLEEventHandler,
-    mut central: Central<'static, ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>>,
+    mut central: Central<
+        'static,
+        ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>,
+        DefaultPacketPool,
+    >,
     stack: &'static trouble_host::Stack<
         'static,
         ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>,
+        DefaultPacketPool,
     >,
 ) {
     let config = || trouble_host::prelude::ConnectConfig {
@@ -270,7 +273,7 @@ async fn ble_connection(
             connection.handle(),
             connection.is_connected()
         );
-        let client = GattClient::<_, 10, { consts::BLE_L2CAP_MTU }>::new(stack, &connection)
+        let client = GattClient::<_, _, { consts::MAX_SERVICES }>::new(stack, &connection)
             .await
             .todo_msg("new gatt");
         log::trace!("services by uuid");
@@ -384,6 +387,7 @@ pub fn sniffer_callback(pkt: PromiscuousPkt) {
 async fn wifi_connection(
     spawn: embassy_executor::Spawner,
     mut controller: WifiController<'static>,
+    mut sniffer: esp_wifi::wifi::Sniffer,
     ap_stack: Stack<'static>,
     sta_stack: Stack<'static>,
     ap_mac: MACAddress,
@@ -409,14 +413,12 @@ async fn wifi_connection(
     controller.start_async().await.unwrap();
     log::info!("Started WIFI");
 
-    let mut sniffer = controller.take_sniffer().expect("take sniffer once");
-    sniffer.set_promiscuous_mode(true).unwrap();
-
     let controller = make_static!(
-        tree_mesh::AsyncMutex<WifiController<'static>>,
-        tree_mesh::AsyncMutex::new(controller)
+        tree_mesh::AsyncMutex<(WifiController<'static>, Configuration)>,
+        tree_mesh::AsyncMutex::new((controller, config))
     );
 
+    sniffer.set_promiscuous_mode(true).unwrap();
     sniffer.set_receive_cb(sniffer_callback);
 
     spawn.must_spawn(tree_mesh_task(
@@ -449,7 +451,7 @@ async fn feed_wdt() -> ! {
     // Note: This doesn't seem to do anything when less than 380000us
     wdt.set_timeout(
         esp_hal::timer::timg::MwdtStage::Stage0,
-        esp_hal::delay::MicrosDurationU64::secs(5),
+        esp_hal::time::Duration::from_secs(5),
     );
     loop {
         wdt.feed();
@@ -506,7 +508,7 @@ async fn main(spawn: embassy_executor::Spawner) {
     let mut prng = if let Some(seed) = consts::RNG_SEED {
         SmallRng::seed_from_u64(seed)
     } else {
-        let mut buf = [0u8; 16];
+        let mut buf = [0u8; 32];
         rng.read(&mut buf);
         SmallRng::from_seed(buf)
     };
@@ -523,11 +525,19 @@ async fn main(spawn: embassy_executor::Spawner) {
         EspWifiController<'static>,
         esp_wifi::init(timer.timer1, rng, peripherals.RADIO_CLK).unwrap()
     );
-    let (wifi_ap_device, wifi_sta_device, wifi_controller) =
-        esp_wifi::wifi::new_ap_sta(&*init, peripherals.WIFI).unwrap();
+    let (
+        wifi_controller,
+        Interfaces {
+            sta: wifi_sta_device,
+            ap: wifi_ap_device,
+            sniffer: wifi_sniffer,
+            ..
+        },
+    ) = esp_wifi::wifi::new(init, peripherals.WIFI).unwrap();
     let ble_connector = esp_wifi::ble::controller::BleConnector::new(&*init, peripherals.BT);
     let ble_resources = make_static!(const
         trouble_host::HostResources::<
+            DefaultPacketPool,
             { consts::BLE_CONNECTIONS_MAX },
             { consts::BLE_L2CAP_CHANNELS_MAX },
             { consts::BLE_L2CAP_MTU },
@@ -538,11 +548,12 @@ async fn main(spawn: embassy_executor::Spawner) {
         trouble_host::Stack<
             'static,
             ExternalController<BleConnector<'static>, { consts::BLE_SLOTS }>,
+            DefaultPacketPool,
         >,
         trouble_host::new(ExternalController::new(ble_connector), ble_resources,)
             .set_random_address(trouble_host::Address {
                 kind: AddrKind::RANDOM,
-                addr: BdAddr::new(prng.r#gen()),
+                addr: BdAddr::new(prng.random()),
             })
     );
     let ap_mac = MACAddress(wifi_ap_device.mac_address());
@@ -563,7 +574,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
-        prng.r#gen(),
+        prng.random(),
     );
     assert!(consts::MTU <= wifi_sta_device.capabilities().max_transmission_unit);
     let (sta_stack, sta_runner) = embassy_net::new(
@@ -577,13 +588,21 @@ async fn main(spawn: embassy_executor::Spawner) {
             StackResources::<{ tree_mesh::consts::MAX_NODES * 2 }>,
             StackResources::new()
         ),
-        prng.r#gen(),
+        prng.random(),
     );
 
-    spawn.must_spawn(ap_task(ap_runner));
-    spawn.must_spawn(sta_task(sta_runner));
+    spawn.must_spawn(wifi_device_task(ap_runner));
+    spawn.must_spawn(wifi_device_task(sta_runner));
     spawn.must_spawn(boot_button_reply(peripherals.GPIO0));
-    wifi_connection(spawn, wifi_controller, ap_stack, sta_stack, ap_mac).await;
+    wifi_connection(
+        spawn,
+        wifi_controller,
+        wifi_sniffer,
+        ap_stack,
+        sta_stack,
+        ap_mac,
+    )
+    .await;
 
     // Setup mesh overlay device.
     let ap_socket = UdpSocket::new(
@@ -634,7 +653,7 @@ async fn main(spawn: embassy_executor::Spawner) {
             dns_servers: Default::default(),
         }),
         make_static!(const StackResources::<1>, StackResources::new()),
-        prng.r#gen(),
+        prng.random(),
     );
     spawn.must_spawn(mesh_task(mesh_stack_runner, mesh_device_runner));
 

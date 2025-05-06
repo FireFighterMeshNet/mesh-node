@@ -1,6 +1,6 @@
 use common::UnwrapExt;
 use embassy_sync::once_lock::OnceLock;
-use esp_wifi::wifi::{event::EventExt, WifiController};
+use esp_wifi::wifi::{Configuration, WifiController, event::EventExt};
 use ieee80211::mac_parser::MACAddress;
 use tree_mesh::simulator::{Event, GetMac, Sniffer};
 
@@ -31,7 +31,7 @@ macro_rules! wrap_event {
         }
         impl GetMac for $wrapper {
             fn mac(&self) -> MACAddress {
-                MACAddress(self.0 .0.$member)
+                MACAddress(self.0.0.$member)
             }
         }
     };
@@ -60,7 +60,7 @@ impl tree_mesh::simulator::IO for EspIO {
     /// One of Espressif's OUIs taken from <https://standards-oui.ieee.org/>
     const OUI: [u8; 3] = [0x10, 0x06, 0x1C];
     type WifiError = esp_wifi::wifi::WifiError;
-    type Controller = WifiController<'static>;
+    type Controller = (WifiController<'static>, Configuration);
     type StaDisconnected = StaDisconnected;
     type StaConnected = StaConnected;
     type ApStadisconnected = ApStadisconnected;
@@ -87,11 +87,10 @@ impl tree_mesh::simulator::IO for EspIO {
     /// # Panics
     /// If Wifi is not intialized with STA.
     async fn connect_to_other_node(
-        controller: &mut WifiController<'static>,
+        (controller, config): &mut (WifiController<'static>, Configuration),
         bssid: MACAddress,
         retries: usize,
     ) -> Result<(), esp_wifi::wifi::WifiError> {
-        let mut config = controller.configuration().unwrap();
         if config.as_client_conf_ref().unwrap().bssid == Some(bssid.0)
             && matches!(controller.is_connected(), Ok(true))
         {

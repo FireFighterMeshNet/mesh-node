@@ -524,22 +524,23 @@ checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
 
 [[package]]
 name = "error_set"
-version = "0.7.0"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6b480d31460f72eda2955b10b81146f68e1e8ef5136d35e559939e2fde07f0"
+checksum = "7a5cfac9e0befd56d4a6f7ffdad3558f798d1fc005dfaaa99ed5202efd7abec6"
 dependencies = [
  "error_set_impl",
 ]
 
 [[package]]
 name = "error_set_impl"
-version = "0.7.0"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d449cd125912cacf5bb583db2a4f8730bea5d625e010ec5f84a939a6740d5cec"
+checksum = "a4937429fd4e1421897226f4337c9e1a4c4206f886828e51dea621cbdcb9fd38"
 dependencies = [
  "indices",
  "proc-macro2",
  "quote",
+ "regex",
  "syn 2.0.89",
 ]
 
@@ -1379,7 +1380,7 @@ dependencies = [
  "smoltcp",
  "static_cell",
  "tree_mesh",
- "zerocopy 0.8.14",
+ "zerocopy 0.8.25",
 ]
 
 [[package]]
@@ -1525,11 +1526,11 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.14"
+version = "0.8.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a367f292d93d4eab890745e75a778da40909cab4d6ff8173693812f79c4a2468"
+checksum = "a1702d9583232ddb9174e01bb7c15a2ab8fb1bc6f227aa1233858c351a3ba0cb"
 dependencies = [
- "zerocopy-derive 0.8.14",
+ "zerocopy-derive 0.8.25",
 ]
 
 [[package]]
@@ -1545,9 +1546,9 @@ dependencies = [
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.14"
+version = "0.8.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3931cb58c62c13adec22e38686b559c86a30565e16ad6e8510a337cedc611e1"
+checksum = "28a6e20d751156648aa063f3800b706ee209a32c0b4d9f24be3d980b01be55ef"
 dependencies = [
  "proc-macro2",
  "quote",
