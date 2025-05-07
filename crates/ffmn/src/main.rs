@@ -460,38 +460,12 @@ async fn feed_wdt() -> ! {
     }
 }
 
-/// Initialize a global heap allocator providing a heap of the given size in
-/// bytes. This supports attributes.
-/// ```
-/// // Use 64kB in the same region stack uses (dram_seg), for the heap.
-/// heap_allocator(size: 64000)
-/// // Use 64kB in dram2_seg for the heap, which is otherwise unused.
-/// heap_allocator(#[link_section = ".dram2_uninit"] size: 64000)
-/// ```
-#[macro_export]
-macro_rules! heap_allocator {
-    ($size:expr) => (heap_allocator!(size: $size));
-    ($(#[$m:meta])* size: $size:expr) => {{
-        $(#[$m])*
-        static mut HEAP: core::mem::MaybeUninit<[u8; $size]> = core::mem::MaybeUninit::uninit();
-
-        #[allow(static_mut_refs)]
-        unsafe {
-            esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-                HEAP.as_mut_ptr() as *mut u8,
-                $size,
-                esp_alloc::MemoryCapability::Internal.into(),
-            ));
-        }
-    }};
-}
-
 #[esp_hal_embassy::main]
 async fn main(spawn: embassy_executor::Spawner) {
     // Provides #[global_allocator] with given number of bytes.
     // Bigger value here means smaller space left for stack if linked in dram_seg, as is done by default.
     // `esp-wifi` recommends at least `92k` for `coex` and `72k` for wifi.
-    heap_allocator!(
+    esp_alloc::heap_allocator!(
         // Use dram2_seg and the bootloader memory.
         // See the linker and memory layout files <https://github.com/esp-rs/esp-hal/tree/main/esp-hal/ld/esp32> and the pr <https://github.com/esp-rs/esp-hal/pull/2079>
         #[unsafe(link_section = ".dram2_uninit")]
